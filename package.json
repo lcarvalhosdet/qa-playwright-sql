@@ -1,0 +1,18 @@
+{
+  "name": "qa-playwright-sql",
+  "version": "1.0.0",
+  "description": "UI, API and database tests with Playwright, TypeScript and PostgreSQL",
+  "private": true,
+  "scripts": {
+    "test": "playwright test",
+    "test:web": "playwright test --project=ui --project=api",
+    "test:db": "playwright test --project=db",
+    "report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.65.1",
+    "@types/node": "^26.6.11",
+    "@types/pg": "^8.23.1",
+    "pg": "^8.23.1"
+  }
+}
