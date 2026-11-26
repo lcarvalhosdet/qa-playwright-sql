@@ -10,7 +10,7 @@ UI, API and database tests in one small Playwright project, written in TypeScrip
 | --- | --- | --- |
 | UI | [Sauce Demo](https://www.saucedemo.com) | login and add to cart, locked-out user error, sort by price |
 | API | [JSONPlaceholder](https://jsonplaceholder.typicode.com) | GET a post, POST a post, 404 for a missing post |
-| Database | PostgreSQL 16 in Docker | queries (joins, GROUP BY with FILTER and HAVING, data-quality checks), constraints (CHECK, UNIQUE, ENUM, generated and identity columns, foreign keys with RESTRICT and CASCADE) and index usage read from `EXPLAIN` |
+| Database | PostgreSQL 16 in Docker | queries (joins, GROUP BY with FILTER and HAVING, data-quality checks), functions (scalar and table, errors, volatility), constraints (CHECK, UNIQUE, ENUM, generated and identity columns, foreign keys with RESTRICT and CASCADE) and index usage read from `EXPLAIN` |
 
 ## Database
 
@@ -21,8 +21,11 @@ A small e-commerce schema: `customers`, `products`, `orders`, `order_items` and 
 | `01_schema.sql` | tables, an `order_status` ENUM, `CHECK` rules (no negative stock, known payment methods), identity keys, a generated `subtotal` column, foreign keys with `ON DELETE RESTRICT` and `CASCADE` |
 | `02_indexes.sql` | indexes on the foreign keys, an expression index for case-insensitive unique emails, a partial index for pending orders |
 | `03_seed.sql` | the data the tests rely on |
+| `04_functions.sql` | `order_total` (PL/pgSQL, raises a custom SQLSTATE), `apply_discount` (`IMMUTABLE STRICT`), `customer_summary` (SQL table function, inlined by the planner), `can_fulfill` (SQL-standard `BEGIN ATOMIC` body) |
 
 The constraint tests check the SQLSTATE code and the constraint name rather than the error text, and every write runs in a transaction that is rolled back. The index tests add 20,000 rows inside a transaction, run `ANALYZE` and assert on the plan from `EXPLAIN (FORMAT JSON)`.
+
+The function tests compare `order_total` with an independent `GROUP BY` query, run `apply_discount` as a table of cases including rounding and the 0 and 100 edges, and check the properties that matter beyond the result: a `STABLE` function is refused in an index, a SQL function is inlined into the caller's plan, and a `BEGIN ATOMIC` body blocks dropping a column it reads.
 
 ## Run it
 
@@ -54,6 +57,7 @@ tests/ui/                    UI tests (Sauce Demo)
 tests/api/                   API tests (JSONPlaceholder)
 tests/db/orders.spec.ts      queries and data-quality checks
 tests/db/schema.spec.ts      constraints and index usage
+tests/db/functions.spec.ts   functions: results, errors, volatility, inlining
 tests/db/db.fixture.ts       worker-scoped pg connection and a rolled-back transaction helper
 db/init/                     schema, indexes and seed, run in name order
 sql/queries.sql              joins, aggregation, constraints and EXPLAIN examples for DBeaver or psql

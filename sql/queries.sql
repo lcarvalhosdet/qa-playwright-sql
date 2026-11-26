@@ -95,3 +95,55 @@ EXPLAIN ANALYZE SELECT * FROM orders WHERE customer_id = 2;  -- Seq Scan over 20
 EXPLAIN SELECT id FROM orders WHERE status = 'PENDING' ORDER BY created_at;
 EXPLAIN SELECT id FROM orders WHERE status = 'PAID'    ORDER BY created_at;
 ROLLBACK;
+
+-- ---------------------------------------------------------------------------
+-- Functions (db/init/04_functions.sql)
+-- ---------------------------------------------------------------------------
+
+-- Scalar function, called once per row
+SELECT id, status, order_total(id) AS total FROM orders ORDER BY id;  -- 250.00, 50.00, 900.00, 150.00
+
+SELECT order_total(999);                         -- fails: P0002 order 999 does not exist
+
+-- IMMUTABLE and STRICT
+SELECT apply_discount(250, 10);                  -- 225.00
+SELECT apply_discount(9.99, 15);                 -- 8.49 (8.4915 rounded)
+SELECT apply_discount(NULL, 10);                 -- NULL, the body never runs
+SELECT apply_discount(10, 101);                  -- fails: 22023 with a HINT
+
+-- Named arguments: the order no longer matters
+SELECT apply_discount(p_percent => 10, p_amount => 250);  -- 225.00
+
+-- Table function, called in FROM
+SELECT * FROM customer_summary(1);               -- Ana: 2 orders, 300.00, 150.00 average
+
+-- LATERAL runs the function once per row of the table on its left
+SELECT c.name, s.*
+FROM customers c
+CROSS JOIN LATERAL customer_summary(c.id) s
+ORDER BY s.revenue DESC;                         -- Bruno, Ana, Carla with 0.00
+
+-- Inlining: the SQL function disappears from the plan, which uses the index
+-- inside it. A PL/pgSQL function would show up as a "Function Scan".
+EXPLAIN SELECT * FROM customer_summary(1);
+
+SELECT can_fulfill(1, 10), can_fulfill(1, 11), can_fulfill(999, 1);  -- true, false, false
+
+-- The volatility of each function: i = IMMUTABLE, s = STABLE, v = VOLATILE
+SELECT proname, provolatile, proisstrict, l.lanname
+FROM pg_proc p
+JOIN pg_language l ON l.oid = p.prolang
+WHERE proname IN ('order_total', 'apply_discount', 'customer_summary', 'can_fulfill');
+
+-- Only IMMUTABLE functions can be used in an index
+CREATE INDEX ON orders (order_total(id));        -- fails: 42P17
+
+-- BEGIN ATOMIC records what the body uses
+ALTER TABLE products DROP COLUMN stock;          -- fails: 2BP01, can_fulfill depends on it
+
+-- Snapshot trap: every part of one statement sees the data as it was when the
+-- statement started, so the function does not see the order inserted by the CTE.
+BEGIN;
+WITH new_order AS (INSERT INTO orders (customer_id) VALUES (3) RETURNING id)
+SELECT order_total(id) FROM new_order;           -- fails: order N does not exist
+ROLLBACK;
