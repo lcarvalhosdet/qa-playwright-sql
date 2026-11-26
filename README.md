@@ -1,6 +1,6 @@
 # QA automation with Playwright and SQL
 
-![tests](https://github.com/YOUR-USER/qa-playwright-sql/actions/workflows/tests.yml/badge.svg)
+[![tests](https://github.com/lcarvalhosdet/qa-playwright-sql/actions/workflows/tests.yml/badge.svg)](https://github.com/lcarvalhosdet/qa-playwright-sql/actions/workflows/tests.yml)
 
 UI, API and database tests in one small Playwright project, written in TypeScript and run on every push with GitHub Actions.
 
