@@ -88,12 +88,16 @@ test.describe('customer_summary', () => {
     ]);
   });
 
-  test('is a SQL function, so the planner inlines it and uses the index', async ({ db }) => {
-    // A PL/pgSQL function would show up as a "Function Scan" node.
+  test('is a SQL function, so the planner inlines it into the calling query', async ({ db }) => {
+    // A PL/pgSQL function would show up as one opaque "Function Scan" node.
+    // Inlined, its own tables appear in the caller's plan instead. Whether
+    // those tables are read by index or Seq Scan depends on the statistics,
+    // so the test does not assert on that.
     const { rows } = await db.query('EXPLAIN (FORMAT JSON) SELECT * FROM customer_summary(1)');
     const plan = JSON.stringify(rows[0]['QUERY PLAN']);
     expect(plan).not.toContain('Function Scan');
-    expect(plan).toContain('orders_customer_id_idx');
+    expect(plan).toContain('"Relation Name":"orders"');
+    expect(plan).toContain('"Relation Name":"order_items"');
   });
 });
 

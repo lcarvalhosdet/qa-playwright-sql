@@ -123,8 +123,8 @@ FROM customers c
 CROSS JOIN LATERAL customer_summary(c.id) s
 ORDER BY s.revenue DESC;                         -- Bruno, Ana, Carla with 0.00
 
--- Inlining: the SQL function disappears from the plan, which uses the index
--- inside it. A PL/pgSQL function would show up as a "Function Scan".
+-- Inlining: the SQL function disappears from the plan, which reads orders and
+-- order_items directly. A PL/pgSQL function would show up as a "Function Scan".
 EXPLAIN SELECT * FROM customer_summary(1);
 
 SELECT can_fulfill(1, 10), can_fulfill(1, 11), can_fulfill(999, 1);  -- true, false, false
@@ -147,3 +147,53 @@ BEGIN;
 WITH new_order AS (INSERT INTO orders (customer_id) VALUES (3) RETURNING id)
 SELECT order_total(id) FROM new_order;           -- fails: order N does not exist
 ROLLBACK;
+
+-- ---------------------------------------------------------------------------
+-- Procedures (db/init/05_procedures.sql)
+-- ---------------------------------------------------------------------------
+-- Everything here runs inside BEGIN ... ROLLBACK, so the seed stays as it is.
+
+BEGIN;
+-- The INOUT parameter comes back as a row
+CALL place_order(1, '[{"product_id": 1, "quantity": 2}, {"product_id": 2, "quantity": 3}]');  -- p_order_id 5
+
+SELECT id, sku, stock FROM products ORDER BY id;           -- keyboard 8, mouse 22
+SELECT * FROM order_items WHERE order_id = 5;              -- prices copied from products
+SELECT order_total(5);                                     -- 450.00
+
+CALL pay_order(5, 'PIX');
+SELECT status FROM orders WHERE id = 5;                    -- PAID
+SELECT * FROM payments WHERE order_id = 5;                 -- 450.00 PIX
+
+CALL cancel_order(5);
+SELECT id, sku, stock FROM products ORDER BY id;           -- keyboard 10, mouse 25 again
+ROLLBACK;
+
+-- Errors: run them one at a time
+CALL place_order(1, '[{"product_id": 3, "quantity": 4}]');    -- SH001, DETAIL: requested 4, in stock 3
+CALL place_order(1, '[{"product_id": 1, "quantity": 1}, {"product_id": 1, "quantity": 1}]');  -- 22023 with a HINT
+CALL place_order(999, '[{"product_id": 1, "quantity": 1}]');  -- P0002 customer 999 does not exist
+CALL pay_order(1, 'CARD');                                    -- SH002 order 1 is PAID
+CALL cancel_order(4);                                         -- SH002 order 4 is CANCELLED
+SELECT place_order(1, '[]');                                  -- 42809 HINT: To call a procedure, use CALL.
+
+-- Atomicity: the keyboard is fine, the monitor is not, and nothing is saved
+CALL place_order(1, '[{"product_id": 1, "quantity": 1}, {"product_id": 3, "quantity": 99}]');
+SELECT stock FROM products WHERE id = 1;                      -- still 10
+SELECT count(*) FROM orders;                                  -- still 4
+
+-- Transaction control: COMMIT inside a procedure fails within BEGIN
+BEGIN;
+INSERT INTO orders (customer_id, created_at) VALUES (3, '1999-01-01');
+CALL expire_pending_orders('2000-01-01');                     -- NOTICE, then 2D000
+ROLLBACK;
+
+-- Outside BEGIN it commits after each batch. The cutoff is in the past, so
+-- this finds nothing to expire in the seed and changes nothing.
+CALL expire_pending_orders('2000-01-01', 2);                  -- p_expired 0
+
+-- The procedures and their arguments
+SELECT proname, pg_get_function_arguments(oid)
+FROM pg_proc
+WHERE prokind = 'p'                                           -- p = procedure, f = function
+  AND pronamespace = 'public'::regnamespace;

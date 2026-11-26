@@ -29,6 +29,16 @@ export default defineConfig({
     {
       name: 'db',
       testDir: './tests/db',
+      testIgnore: /\.commit\.spec\.ts$/,
+    },
+    {
+      // Tests that COMMIT for real. They start only after every "db" test has
+      // finished, so the rolled-back tests never see their data.
+      name: 'db-commit',
+      testDir: './tests/db',
+      testMatch: /\.commit\.spec\.ts$/,
+      dependencies: ['db'],
+      workers: 1, // committed data is visible to every connection, so one at a time
     },
   ],
 });
