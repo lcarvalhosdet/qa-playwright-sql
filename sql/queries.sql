@@ -252,3 +252,104 @@ BEGIN;
 INSERT INTO orders (customer_id) VALUES (3);                 -- succeeds for now
 SET CONSTRAINTS orders_must_have_items IMMEDIATE;            -- SH003: check runs here
 ROLLBACK;
+
+-- ---------------------------------------------------------------------------
+-- Advanced queries (db/init/07_advanced_queries.sql)
+-- ---------------------------------------------------------------------------
+
+-- Recursive CTEs
+SELECT path, depth FROM category_tree ORDER BY path;
+SELECT * FROM category_ancestors((SELECT id FROM categories WHERE name = 'Keyboards'));
+SELECT path, products, units, revenue FROM category_sales ORDER BY path;
+
+-- Window functions
+SELECT * FROM customer_order_history ORDER BY customer_id, order_number;
+SELECT sku, revenue, row_number, rank, dense_rank, pct_of_revenue FROM product_sales ORDER BY row_number;
+
+-- LEAD looks forward the way LAG looks back; FIRST_VALUE reads the first row of the window
+SELECT customer, order_id, total,
+       LEAD(order_id)          OVER w AS next_order,
+       FIRST_VALUE(order_id)   OVER w AS first_order,
+       total - AVG(total)      OVER (PARTITION BY customer_id) AS vs_customer_avg
+FROM order_totals
+WINDOW w AS (PARTITION BY customer_id ORDER BY created_at, order_id)
+ORDER BY customer, order_id;
+
+-- ROLLUP, and CUBE for every combination of the columns
+SELECT * FROM revenue_by_city ORDER BY level, city, customer;
+
+SELECT c.city, ot.status, SUM(ot.total) AS revenue, GROUPING(c.city, ot.status) AS level
+FROM order_totals ot
+JOIN customers c ON c.id = ot.customer_id
+GROUP BY CUBE (c.city, ot.status)
+ORDER BY level, c.city, ot.status;
+
+-- DISTINCT ON: the first row of each group, by the ORDER BY. Here the most
+-- recent order of each customer. PostgreSQL only, but shorter than the
+-- ROW_NUMBER() = 1 pattern below it.
+SELECT DISTINCT ON (customer_id) customer, order_id, status, total
+FROM order_totals
+ORDER BY customer_id, created_at DESC, order_id DESC;
+
+SELECT customer, order_id, status, total
+FROM (
+  SELECT ot.*, ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY created_at DESC, order_id DESC) AS rn
+  FROM order_totals ot
+) latest
+WHERE rn = 1;
+
+-- Top N per group with LATERAL: the 2 most expensive items each customer bought
+SELECT c.name, top.product, top.subtotal
+FROM customers c
+CROSS JOIN LATERAL (
+  SELECT p.name AS product, oi.subtotal
+  FROM orders o
+  JOIN order_items oi ON oi.order_id = o.id
+  JOIN products p     ON p.id = oi.product_id
+  WHERE o.customer_id = c.id
+  ORDER BY oi.subtotal DESC
+  LIMIT 2
+) AS top
+ORDER BY c.name, top.subtotal DESC;
+
+-- CTE MATERIALIZED: since PostgreSQL 12 a CTE used once is inlined into the
+-- query like a subquery. MATERIALIZED forces it to be computed once and kept,
+-- which can be faster or slower: compare the plans.
+EXPLAIN WITH paid AS (SELECT * FROM orders WHERE status = 'PAID')
+SELECT * FROM paid WHERE customer_id = 1;               -- inlined: one scan with both conditions
+
+EXPLAIN WITH paid AS MATERIALIZED (SELECT * FROM orders WHERE status = 'PAID')
+SELECT * FROM paid WHERE customer_id = 1;               -- CTE Scan over a stored result
+
+-- Materialized view
+SELECT * FROM daily_sales ORDER BY day;
+REFRESH MATERIALIZED VIEW CONCURRENTLY daily_sales;     -- readers keep reading the old rows
+
+-- Views and materialized views in the database
+SELECT table_name, 'view' AS kind FROM information_schema.views WHERE table_schema = 'public'
+UNION ALL
+SELECT matviewname, 'materialized view' FROM pg_matviews
+ORDER BY 1;
+
+-- UPSERT
+BEGIN;
+SELECT * FROM import_products('[
+  {"sku": "KB-01", "name": "Keyboard", "price": 150, "received": 0},
+  {"sku": "MS-01", "name": "Mouse",    "price": 45},
+  {"sku": "HD-01", "name": "Headset",  "price": 80,  "received": 5}
+]');                                                    -- MS-01 updated, HD-01 inserted, KB-01 unchanged
+SELECT sku, price, stock FROM products ORDER BY id;
+ROLLBACK;
+
+-- MERGE (PostgreSQL 15+) is the SQL-standard way to the same result, and can
+-- also delete. It has no RETURNING before PostgreSQL 17.
+BEGIN;
+MERGE INTO products p
+USING (VALUES ('MS-01', 'Mouse', 45.00, 0), ('HD-01', 'Headset', 80.00, 5)) AS f(sku, name, price, received)
+ON p.sku = f.sku
+WHEN MATCHED THEN
+  UPDATE SET name = f.name, price = f.price, stock = p.stock + f.received
+WHEN NOT MATCHED THEN
+  INSERT (sku, name, price, stock) VALUES (f.sku, f.name, f.price, f.received);
+SELECT sku, price, stock FROM products ORDER BY id;
+ROLLBACK;

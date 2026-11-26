@@ -10,11 +10,11 @@ UI, API and database tests in one small Playwright project, written in TypeScrip
 | --- | --- | --- |
 | UI | [Sauce Demo](https://www.saucedemo.com) | login and add to cart, locked-out user error, sort by price |
 | API | [JSONPlaceholder](https://jsonplaceholder.typicode.com) | GET a post, POST a post, 404 for a missing post |
-| Database | PostgreSQL 16 in Docker | queries (joins, GROUP BY with FILTER and HAVING, data-quality checks), functions (scalar and table, errors, volatility), procedures (atomic orders, stock locking, batch job with `COMMIT`), triggers (audit log, status rules, stock alerts, a rule checked at `COMMIT`), constraints (CHECK, UNIQUE, ENUM, generated and identity columns, foreign keys with RESTRICT and CASCADE) and index usage read from `EXPLAIN` |
+| Database | PostgreSQL 16 in Docker | queries (joins, GROUP BY with FILTER and HAVING, data-quality checks), functions (scalar and table, errors, volatility), procedures (atomic orders, stock locking, batch job with `COMMIT`), triggers (audit log, status rules, stock alerts, a rule checked at `COMMIT`), reporting views (recursive CTEs, window functions, `ROLLUP`, a materialized view) and `UPSERT`, constraints (CHECK, UNIQUE, ENUM, generated and identity columns, foreign keys with RESTRICT and CASCADE) and index usage read from `EXPLAIN` |
 
 ## Database
 
-A small e-commerce schema: `customers`, `products`, `orders`, `order_items` and `payments`, plus `audit_log`, `stock_alerts` and `order_status_transitions` from the triggers. The SQL files in `db/init` run in name order:
+A small e-commerce schema: `customers`, `products`, `orders`, `order_items` and `payments`, plus `audit_log`, `stock_alerts` and `order_status_transitions` from the triggers, and a `categories` tree. The SQL files in `db/init` run in name order:
 
 | File | What it has |
 | --- | --- |
@@ -24,6 +24,7 @@ A small e-commerce schema: `customers`, `products`, `orders`, `order_items` and 
 | `04_functions.sql` | `order_total` (PL/pgSQL, raises a custom SQLSTATE), `apply_discount` (`IMMUTABLE STRICT`), `customer_summary` (SQL table function, inlined by the planner), `can_fulfill` (SQL-standard `BEGIN ATOMIC` body) |
 | `05_procedures.sql` | `place_order` (JSON items, row locks in id order, `INOUT` result, `EXCEPTION` block that translates an error), `pay_order`, `cancel_order` (status rules with custom SQLSTATEs), `expire_pending_orders` (batch job that commits after each batch) |
 | `06_triggers.sql` | `updated_at` set by a `BEFORE UPDATE` trigger with a `WHEN` clause, status changes checked against a rules table, a JSONB audit log of every insert, update and delete, kept append-only by triggers that refuse `UPDATE`, `DELETE` and `TRUNCATE`, stock alerts from a `FOR EACH STATEMENT` trigger with transition tables, and a deferred constraint trigger that rejects, at `COMMIT`, an order without items |
+| `07_advanced_queries.sql` | a category tree read with recursive CTEs (top-down path, bottom-up walk protected by the `CYCLE` clause, a closure table that rolls sales up the tree), window functions (`ROW_NUMBER`, `RANK`, `DENSE_RANK`, running total with an explicit `ROWS` frame, `LAG`), `GROUP BY ROLLUP` with `GROUPING()`, a materialized view with a 7-day `RANGE` window refreshed `CONCURRENTLY`, and an `INSERT ... ON CONFLICT DO UPDATE` import. Dates use the shop's time zone, America/Recife |
 
 The constraint tests check the SQLSTATE code and the constraint name rather than the error text, and every write runs in a transaction that is rolled back. The index tests add 20,000 rows inside a transaction, run `ANALYZE` and assert on the plan from `EXPLAIN (FORMAT JSON)`.
 
@@ -32,6 +33,8 @@ The function tests compare `order_total` with an independent `GROUP BY` query, r
 The procedure tests follow an order through place, pay and cancel, checking the stock and the copied prices at each step, and run every invalid input as a case with its SQLSTATE and message. The atomicity test runs without a wrapping transaction: one good item and one that fails, then it checks that neither the order nor the stock change was saved. The batch job commits for real, so it runs in a separate `db-commit` Playwright project that starts after the other database tests. It creates its own data, proves each batch was its own transaction by counting distinct `xmin` values, and deletes everything at the end. A second test holds a row lock from another connection and checks that the job skips that order instead of waiting.
 
 The trigger tests run each allowed and rejected status change as a case, read the audit rows of their own transaction (`transaction_id = txid_current()`) to check the old values, new values and changed fields, including a whole `place_order` and `pay_order` flow, and check that one `UPDATE` over every product raises an alert only for the product that crossed its reorder level. The deferred rule is tested both ways: `SET CONSTRAINTS ... IMMEDIATE` inside a transaction, and a real `COMMIT` that fails and saves nothing.
+
+The reporting tests check each view against the seed, which has a revenue tie between the keyboard and the mouse that shows `ROW_NUMBER`, `RANK` and `DENSE_RANK` side by side. Date-based views get a customer with orders on fixed dates, including one at 23:30 in Recife that is already the next day in UTC. Other cases: a loop in the category data that the `CYCLE` clause stops (without it the query hits the statement timeout), a `NULL` city that `GROUPING()` tells apart from a subtotal, a materialized view that shows new orders only after `REFRESH`, and an import that saves nothing when one row fails.
 
 ## Run it
 
@@ -66,9 +69,10 @@ tests/db/schema.spec.ts      constraints and index usage
 tests/db/functions.spec.ts   functions: results, errors, volatility, inlining
 tests/db/procedures.spec.ts  procedures: order flow, invalid input, atomicity
 tests/db/triggers.spec.ts    triggers: updated_at, status rules, audit log, alerts, deferred rule
+tests/db/reporting.spec.ts   views: recursive CTEs, window functions, ROLLUP, materialized view, upsert
 tests/db/expire.commit.spec.ts  batch job that commits, in the db-commit project
 tests/db/db.fixture.ts       worker-scoped pg connection and a rolled-back transaction helper
-db/init/                     schema, indexes, seed, functions, procedures and triggers, run in name order
+db/init/                     schema, indexes, seed, functions, procedures, triggers and views, run in name order
 sql/queries.sql              examples of everything above for DBeaver or psql
 .github/workflows/tests.yml  CI with a PostgreSQL service
 ```
