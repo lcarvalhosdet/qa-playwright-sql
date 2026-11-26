@@ -29,6 +29,11 @@ export default defineConfig({
       use: { baseURL: process.env.API_URL ?? 'https://jsonplaceholder.typicode.com' },
     },
     {
+      // Pure functions, such as the retry helper: no browser, database or API.
+      name: 'unit',
+      testDir: './tests/unit',
+    },
+    {
       name: 'db',
       testDir: './tests/db',
       testIgnore: /\.serial\.spec\.ts$/,

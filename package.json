@@ -9,6 +9,7 @@
   "scripts": {
     "test": "playwright test",
     "test:web": "playwright test --project=ui --project=api",
+    "test:unit": "playwright test --project=unit",
     "test:db": "playwright test --project=db --project=db-serial",
     "test:api": "playwright test --project=shop-api",
     "report": "playwright show-report",

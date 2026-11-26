@@ -1,11 +1,18 @@
 import type { FastifyInstance } from 'fastify';
 import type pg from 'pg';
 import { notFound } from '../errors.ts';
+import { inTransaction } from '../retry.ts';
 
-// Each write calls one procedure from 05_procedures.sql. The procedure
-// validates, locks and writes in one statement, so the API does not need a
-// transaction of its own, and every rule it enforces (stock, status changes,
-// duplicates) reaches the client as an HTTP status through errors.ts.
+// Each write calls one procedure from 05_procedures.sql, inside a
+// transaction that api/src/retry.ts runs again if it loses a race (40001 or
+// 40P01). Every rule the database enforces (stock, status changes,
+// duplicates, the pending-order limit) reaches the client as an HTTP status
+// through errors.ts.
+//
+// POST /orders runs as SERIALIZABLE: the pending-order limit in
+// 09_order_limits.sql counts rows, and only SERIALIZABLE keeps two concurrent
+// orders from both passing that count. Payment and cancellation change rows
+// they lock first, so READ COMMITTED is enough for them.
 
 type OrderItem = { productId: number; quantity: number };
 
@@ -55,9 +62,19 @@ export async function orderRoutes(app: FastifyInstance): Promise<void> {
       const { customerId, items } = request.body;
       // The procedure takes the items as JSON, with its own field names.
       const json = JSON.stringify(items.map((i) => ({ product_id: i.productId, quantity: i.quantity })));
-      const { rows } = await app.db.query('CALL place_order($1, $2)', [customerId, json]);
-      const order = await getOrder(app.db, rows[0].p_order_id);
-      return reply.status(201).header('location', `/orders/${order.id}`).send(order);
+      const { value: orderId, attempts } = await inTransaction(
+        app.db,
+        'SERIALIZABLE',
+        async (client) => (await client.query('CALL place_order($1, $2)', [customerId, json])).rows[0].p_order_id,
+        app.retry,
+      );
+      const order = await getOrder(app.db, orderId);
+      return reply
+        .status(201)
+        .header('location', `/orders/${order.id}`)
+        // How many tries the transaction took; more than 1 means it was retried.
+        .header('x-transaction-attempts', String(attempts))
+        .send(order);
     },
   );
 
@@ -69,13 +86,18 @@ export async function orderRoutes(app: FastifyInstance): Promise<void> {
     '/orders/:id/payment',
     { schema: { params: idParams, body: paymentBody } },
     async (request) => {
-      await app.db.query('CALL pay_order($1, $2)', [request.params.id, request.body.method]);
+      await inTransaction(
+        app.db,
+        'READ COMMITTED',
+        (client) => client.query('CALL pay_order($1, $2)', [request.params.id, request.body.method]),
+        app.retry,
+      );
       return getOrder(app.db, request.params.id);
     },
   );
 
   app.post<{ Params: { id: number } }>('/orders/:id/cancel', { schema: { params: idParams } }, async (request) => {
-    await app.db.query('CALL cancel_order($1)', [request.params.id]);
+    await inTransaction(app.db, 'READ COMMITTED', (client) => client.query('CALL cancel_order($1)', [request.params.id]), app.retry);
     return getOrder(app.db, request.params.id);
   });
 }

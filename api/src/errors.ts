@@ -15,8 +15,10 @@ const STATUS_BY_SQLSTATE: Record<string, number> = {
   SH002: 409, // invalid status change
   SH003: 422, // order without items
   SH005: 409, // stale version (optimistic locking)
-  '40001': 503, // serialization_failure: the client may retry
-  '40P01': 503, // deadlock_detected: the client may retry
+  SH006: 409, // too many pending orders
+  // Retryable codes reach this table only after api/src/retry.ts gave up.
+  '40001': 503, // serialization_failure
+  '40P01': 503, // deadlock_detected
 };
 
 export type ErrorBody = {

@@ -29,6 +29,7 @@ Tables: `customers`, `products`, `categories`, `orders`, `order_items` and `paym
 | `06_triggers.sql` | `updated_at` (`BEFORE UPDATE` with `WHEN`), status changes checked against a rules table, a JSONB audit log kept append-only, stock alerts from a `FOR EACH STATEMENT` trigger with transition tables, a deferred constraint trigger that rejects an order without items at `COMMIT` |
 | `07_advanced_queries.sql` | recursive CTEs over a category tree (with the `CYCLE` clause and a closure table), window functions (`ROW_NUMBER`, `RANK`, `DENSE_RANK`, running total, `LAG`), `ROLLUP` with `GROUPING()`, a materialized view with a 7-day `RANGE` window, an `INSERT ... ON CONFLICT DO UPDATE` import |
 | `08_concurrency.sql` | a `version` column and `update_product_price` for optimistic locking, `refresh_daily_sales` guarded by an advisory lock |
+| `09_order_limits.sql` | a limit of pending orders per customer, checked by a trigger that counts rows; exact only under `SERIALIZABLE`, which is why the API retries |
 
 Every file starts with a comment that explains its concepts, and [`sql/queries.sql`](sql/queries.sql) has runnable examples of all of them for DBeaver or psql, including two-session scripts for the concurrency scenarios.
 
@@ -53,13 +54,19 @@ A small [Fastify](https://fastify.dev) app in `api/src` with no business rules o
 | `GET /health` | `SELECT 1` | |
 | `GET /products`, `GET /products/:id` | `products` | 404 |
 | `PATCH /products/:id/price` `{price, version}` | `update_product_price` | 409 `SH005` stale version, 400 invalid body |
-| `POST /orders` `{customerId, items: [{productId, quantity}]}` | `CALL place_order` | 409 `SH001` stock, 404 unknown customer or product, 422 duplicate product, 400 invalid body |
+| `POST /orders` `{customerId, items: [{productId, quantity}]}` | `CALL place_order` | 409 `SH001` stock, 409 `SH006` too many pending orders, 404 unknown customer or product, 422 duplicate product, 400 invalid body |
 | `GET /orders/:id` | `order_totals`, `order_items`, `payments` | 404 |
 | `POST /orders/:id/payment` `{method}` | `CALL pay_order` | 409 `SH002` not pending, 400 unknown method |
 | `POST /orders/:id/cancel` | `CALL cancel_order` | 409 `SH002` already cancelled |
 | `GET /reports/product-sales`, `GET /reports/category-sales` | the reporting views | |
 
 Errors share one shape: `{"error": "...", "code": "SH001", "detail": "...", "hint": "..."}`. Money is a string (`"150.00"`), as PostgreSQL returns `NUMERIC`. Request bodies are checked by JSON schemas, and unknown fields are rejected: Fastify drops them silently by default, which a test caught.
+
+### Retries
+
+Writes run in a transaction that `api/src/retry.ts` repeats from `BEGIN` when it loses a race: `40001` (serialization failure) or `40P01` (deadlock), up to 8 attempts with exponential backoff and full jitter. Any other error is final. `POST /orders` runs as `SERIALIZABLE`, because the pending-order limit counts rows and only `SERIALIZABLE` stops two concurrent orders from both passing that count; payment and cancellation lock the rows they change, so `READ COMMITTED` is enough there. Every response from these routes has an `x-transaction-attempts` header, and a race that is still lost after the last attempt becomes `503` with `retry-after`.
+
+The tests cover it at three levels: unit tests of the helper (which codes are retried, when it gives up, the backoff curve), database tests that show the limit broken under `READ COMMITTED` and kept under `SERIALIZABLE`, and an end-to-end test that sends 12 orders at once against a limit of 3: exactly 3 are created, 9 get `409 SH006`, none get `503`, and the attempts header proves the requests collided and were retried. With retries turned off, that test fails.
 
 The tests start the API themselves. To try it by hand:
 
@@ -81,6 +88,7 @@ npm test                 # all tests
 npm run test:web         # UI and API only, no database
 npm run test:db          # database only
 npm run test:api         # shop API end to end (runs the db tests first)
+npm run test:unit        # unit tests, no database
 npm run report           # open the HTML report
 ```
 
@@ -113,7 +121,8 @@ CI runs the checks and the tests as two parallel jobs.
 pages/login-page.ts                 page object for the login screen
 tests/ui/                           UI tests (Sauce Demo)
 tests/api/                          API tests (JSONPlaceholder)
-api/src/                            the shop API: app, error mapping, routes
+api/src/                            the shop API: app, error mapping, retries, routes
+tests/unit/                         unit tests of pure functions (the retry helper)
 tests/shop-api/                     end-to-end tests: HTTP request, then database checks
 tests/db/db.fixture.ts              worker-scoped pg connection and a rolled-back transaction helper
 tests/db/scratch.ts                 test data that commits for real, removed after each test

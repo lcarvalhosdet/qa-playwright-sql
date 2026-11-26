@@ -242,6 +242,54 @@ async function raceForOnePendingOrder(
   return { outcomes, pending };
 }
 
+// The real rule from db/init/09_order_limits.sql: at most max_pending_orders
+// PENDING orders per customer, checked by a trigger that counts rows. Both
+// sessions place an order (different products, so no row lock is shared)
+// before either commits.
+test.describe('pending-order limit under concurrency', () => {
+  async function bothPlaceAnOrder(db: Client, scratch: Scratch, a: Session, b: Session, level: string) {
+    const customer = await scratch.customer();
+    await db.query('UPDATE customers SET max_pending_orders = 1 WHERE id = $1', [customer]);
+    const [p1, p2] = [await scratch.product(5), await scratch.product(5)];
+
+    await a.client.query(`BEGIN ISOLATION LEVEL ${level}`);
+    await b.client.query(`BEGIN ISOLATION LEVEL ${level}`);
+    const run = (s: Session, product: number) =>
+      start(
+        (async () => {
+          await s.client.query('CALL place_order($1, $2)', [customer, items(product)]);
+          await s.client.query('COMMIT');
+        })(),
+      );
+    // a places its order but does not commit yet; b places its own meanwhile.
+    await a.client.query('CALL place_order($1, $2)', [customer, items(p1)]);
+    const bOutcome = await run(b, p2);
+    const aOutcome = await start(a.client.query('COMMIT'));
+    await a.client.query('ROLLBACK').catch(() => {});
+    await b.client.query('ROLLBACK').catch(() => {});
+
+    const { rows } = await db.query(
+      `SELECT COUNT(*)::int AS n FROM orders WHERE customer_id = $1 AND status = 'PENDING'`,
+      [customer],
+    );
+    return { codes: [aOutcome.error?.code, bOutcome.error?.code], pending: rows[0].n as number };
+  }
+
+  test('READ COMMITTED lets two concurrent orders past a limit of 1', async ({ db, scratch, a, b }) => {
+    const { codes, pending } = await bothPlaceAnOrder(db, scratch, a, b, 'READ COMMITTED');
+    // Each trigger counted only committed orders: 0 < 1 for both.
+    expect(codes).toEqual([undefined, undefined]);
+    expect(pending).toBe(2);
+  });
+
+  test('SERIALIZABLE keeps the limit: the second transaction fails with 40001', async ({ db, scratch, a, b }) => {
+    const { codes, pending } = await bothPlaceAnOrder(db, scratch, a, b, 'SERIALIZABLE');
+    expect(codes.filter(Boolean)).toEqual(['40001']);
+    expect(pending).toBe(1);
+    // A retry of the failed one starts a new snapshot, counts 1 and gets SH006.
+  });
+});
+
 test.describe('deadlocks', () => {
   test('two transactions locking rows in opposite order deadlock, and one is aborted', async ({ db, scratch, a, b }) => {
     const [x, y] = [await scratch.product(10), await scratch.product(10)];
