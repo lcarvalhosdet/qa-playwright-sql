@@ -30,6 +30,7 @@ Tables: `customers`, `products`, `categories`, `orders`, `order_items` and `paym
 | `07_advanced_queries.sql` | recursive CTEs over a category tree (with the `CYCLE` clause and a closure table), window functions (`ROW_NUMBER`, `RANK`, `DENSE_RANK`, running total, `LAG`), `ROLLUP` with `GROUPING()`, a materialized view with a 7-day `RANGE` window, an `INSERT ... ON CONFLICT DO UPDATE` import |
 | `08_concurrency.sql` | a `version` column and `update_product_price` for optimistic locking, `refresh_daily_sales` guarded by an advisory lock |
 | `09_order_limits.sql` | a limit of pending orders per customer, checked by a trigger that counts rows; exact only under `SERIALIZABLE`, which is why the API retries |
+| `10_security.sql` | three least-privilege roles (the API, reporting, customers), routines closed to `PUBLIC`, `SECURITY DEFINER` procedures with a pinned `search_path` as the only write path, an audit log nobody can forge, row-level security so a customer sees only their own orders, and a `security_invoker` view so RLS is not bypassed through it |
 
 Every file starts with a comment that explains its concepts, and [`sql/queries.sql`](sql/queries.sql) has runnable examples of all of them for DBeaver or psql, including two-session scripts for the concurrency scenarios.
 
@@ -45,9 +46,28 @@ Every file starts with a comment that explains its concepts, and [`sql/queries.s
 
 Two bugs were found this way and fixed: the batch job picked the same orders when two runs overlapped (fixed with `SKIP LOCKED`, and a test that fails without it), and an inlining test that depended on table statistics.
 
+## Security
+
+Until `10_security.sql`, everything ran as `qa`, a superuser that may do anything and is not subject to row-level security. That file adds three roles, each with only what it needs:
+
+| Role | Can | Cannot |
+| --- | --- | --- |
+| `shop_api` (the API logs in as this) | read the tables and views its routes return; call `place_order`, `pay_order`, `cancel_order`, `update_product_price` | `INSERT`, `UPDATE` or `DELETE` any table directly; read or write `audit_log`; run the batch job |
+| `shop_reporting` | read the report views | read `customers`, `orders`, `payments` or any other table |
+| `shop_customer` | read the catalog, and their own customer row, orders, items and payments | see another customer's rows (RLS); write anything; read the cross-customer views |
+
+How it fits together:
+
+- **Writes only through procedures.** The write procedures are `SECURITY DEFINER`: they run with the owner's privileges, so `shop_api` can place an order without holding `INSERT` on `orders`. Every rule in them and in the triggers applies to every change, and a bug or an injection in the API cannot go around them. Each one pins `search_path`, so a caller cannot slip in a fake table or function with the same name.
+- **Routines closed by default.** PostgreSQL lets `PUBLIC` execute every new function; `REVOKE` handles the existing ones and `ALTER DEFAULT PRIVILEGES` the ones created later. A catalog test checks that no routine is executable by `PUBLIC`, and caught that the `IN SCHEMA` form of that statement silently does nothing.
+- **An audit log nobody can forge.** The audit trigger runs as the owner, so no role needs `INSERT` on `audit_log`, and none has it. It records the role that made the change (`shop_api` for the API), not the procedure's owner.
+- **Row-level security.** The portal sets `app.customer_id` per transaction, and policies on `customers`, `orders`, `order_items` and `payments` return only that customer's rows; with the setting missing or empty, nothing. A plain view reads as its owner and would leak every row past RLS, which a test demonstrates; `order_totals` is `security_invoker`, so RLS applies through it.
+
+The tests switch roles with `SET LOCAL ROLE` inside rolled-back transactions, and the end-to-end tests check that the API really connects as `shop_api`: not a superuser, not exempt from RLS, refused a direct `UPDATE`, and named in the audit log for the changes it makes.
+
 ## Shop API
 
-A small [Fastify](https://fastify.dev) app in `api/src` with no business rules of its own: each route calls a procedure, function or view from `db/init`, and one table in `api/src/errors.ts` turns the database's SQLSTATE codes into HTTP statuses.
+A small [Fastify](https://fastify.dev) app in `api/src`, connected as `shop_api`, with no business rules of its own: each route calls a procedure, function or view from `db/init`, and one table in `api/src/errors.ts` turns the database's SQLSTATE codes into HTTP statuses.
 
 | Method and path | Calls | Errors |
 | --- | --- | --- |
@@ -72,7 +92,7 @@ The tests start the API themselves. To try it by hand:
 
 ```bash
 docker compose up -d     # the database on port 5432
-npm run api              # http://127.0.0.1:3000
+npm run api              # http://127.0.0.1:3000, connects as shop_api (API_DB_URL to change)
 curl -X POST localhost:3000/orders -H 'content-type: application/json' \
   -d '{"customerId": 1, "items": [{"productId": 1, "quantity": 2}]}'
 ```

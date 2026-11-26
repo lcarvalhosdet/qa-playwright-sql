@@ -30,8 +30,9 @@ ignore_words = order_status
 
 [sqlfluff:rules:capitalisation.identifiers]
 extended_capitalisation_policy = lower
-# The row variables of a trigger, written in upper case in CREATE TRIGGER ... WHEN.
-ignore_words = OLD,NEW
+# The row variables of a trigger, written in upper case in CREATE TRIGGER ... WHEN,
+# and PUBLIC, the keyword for every role in GRANT and REVOKE.
+ignore_words = OLD,NEW,PUBLIC
 
 [sqlfluff:rules:aliasing.table]
 aliasing = implicit

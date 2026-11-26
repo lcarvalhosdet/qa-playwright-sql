@@ -47,20 +47,22 @@ test.describe('POST /orders', () => {
     // The stock went down in the same call.
     expect(await stockOf(db, keyboard, mouse)).toEqual([8, 22]);
 
-    // The audit trigger logged the order and both stock changes in one transaction.
+    // The audit trigger logged the order and both stock changes in one
+    // transaction, under shop_api: the role the API connects as, not the qa
+    // superuser that owns the procedures.
     const { rows: audit } = await db.query(
-      `SELECT table_name, operation, row_id, changed_fields, transaction_id
+      `SELECT table_name, operation, row_id, changed_fields, changed_by, transaction_id
        FROM audit_log
        WHERE (table_name = 'orders' AND row_id = $1) OR (table_name = 'products' AND row_id = ANY($2))
        ORDER BY id`,
       [order.id, [keyboard, mouse]],
     );
-    expect(audit.map((a) => [a.table_name, a.operation, a.row_id, a.changed_fields])).toEqual([
-      ['products', 'INSERT', keyboard, null], // made by scratch
-      ['products', 'INSERT', mouse, null],
-      ['orders', 'INSERT', order.id, null],
-      ['products', 'UPDATE', keyboard, ['stock']],
-      ['products', 'UPDATE', mouse, ['stock']],
+    expect(audit.map((a) => [a.table_name, a.operation, a.row_id, a.changed_fields, a.changed_by])).toEqual([
+      ['products', 'INSERT', keyboard, null, 'qa'], // made by scratch, as qa
+      ['products', 'INSERT', mouse, null, 'qa'],
+      ['orders', 'INSERT', order.id, null, 'shop_api'],
+      ['products', 'UPDATE', keyboard, ['stock'], 'shop_api'],
+      ['products', 'UPDATE', mouse, ['stock'], 'shop_api'],
     ]);
     expect(new Set(audit.slice(2).map((a) => a.transaction_id)).size).toBe(1);
   });

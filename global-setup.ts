@@ -10,8 +10,9 @@ import { buildApp } from './api/src/app.ts';
 // exactly like docker-compose. Skipped when DB_URL is set: the tests then use
 // that database instead.
 //
-// Shop API (project shop-api): the Fastify app from api/src, connected to that
-// database, on a random free port. Skipped when SHOP_API_URL is set.
+// Shop API (project shop-api): the Fastify app from api/src, on a random free
+// port, connected to that database as shop_api, the least-privilege role from
+// 10_security.sql, not as the superuser. Skipped when SHOP_API_URL is set.
 //
 // Workers read DB_URL and SHOP_API_URL from the environment set here.
 export default async function globalSetup(): Promise<() => Promise<void>> {
@@ -37,7 +38,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
   }
 
   if (wants('shop') && !process.env.SHOP_API_URL) {
-    api = buildApp(process.env.DB_URL!);
+    api = buildApp(asRole(process.env.DB_URL!, 'shop_api', 'shop_api'));
     process.env.SHOP_API_URL = await api.listen({ port: 0, host: '127.0.0.1' });
     console.log(`Shop API started on ${process.env.SHOP_API_URL}`);
   }
@@ -46,6 +47,14 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
     await api?.close(); // closes its connection pool first, then the database goes
     await container?.stop();
   };
+}
+
+// The same database URL with another user and password.
+function asRole(databaseUrl: string, user: string, password: string): string {
+  const url = new URL(databaseUrl);
+  url.username = user;
+  url.password = password;
+  return url.toString();
 }
 
 // The names given with --project, if any.
