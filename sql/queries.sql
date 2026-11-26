@@ -81,7 +81,7 @@ SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'orders';
 -- statistics and compare the plans. ROLLBACK undoes everything.
 BEGIN;
 INSERT INTO orders (customer_id, status)
-SELECT 3, 'PAID' FROM generate_series(1, 20000);
+SELECT 3 AS customer_id, 'PAID' AS status FROM generate_series(1, 20000);
 ANALYZE orders;
 
 -- Index Scan (or Bitmap Index Scan) on orders_customer_id_idx
@@ -118,7 +118,8 @@ SELECT apply_discount(p_percent => 10, p_amount => 250);  -- 225.00
 SELECT * FROM customer_summary(1);               -- Ana: 2 orders, 300.00, 150.00 average
 
 -- LATERAL runs the function once per row of the table on its left
-SELECT c.name, s.*
+-- The customer name first reads better than the wildcard first.
+SELECT c.name, s.*  -- noqa: ST06
 FROM customers c
 CROSS JOIN LATERAL customer_summary(c.id) s
 ORDER BY s.revenue DESC;                         -- Bruno, Ana, Carla with 0.00
@@ -127,13 +128,15 @@ ORDER BY s.revenue DESC;                         -- Bruno, Ana, Carla with 0.00
 -- order_items directly. A PL/pgSQL function would show up as a "Function Scan".
 EXPLAIN SELECT * FROM customer_summary(1);
 
-SELECT can_fulfill(1, 10), can_fulfill(1, 11), can_fulfill(999, 1);  -- true, false, false
+SELECT can_fulfill(1, 10)  AS all_ten,          -- true
+       can_fulfill(1, 11)  AS eleven,           -- false
+       can_fulfill(999, 1) AS unknown_product;  -- false
 
 -- The volatility of each function: i = IMMUTABLE, s = STABLE, v = VOLATILE
-SELECT proname, provolatile, proisstrict, l.lanname
+SELECT p.proname, p.provolatile, p.proisstrict, l.lanname
 FROM pg_proc p
 JOIN pg_language l ON l.oid = p.prolang
-WHERE proname IN ('order_total', 'apply_discount', 'customer_summary', 'can_fulfill');
+WHERE p.proname IN ('order_total', 'apply_discount', 'customer_summary', 'can_fulfill');
 
 -- Only IMMUTABLE functions can be used in an index
 CREATE INDEX ON orders (order_total(id));        -- fails: 42P17
@@ -145,6 +148,7 @@ ALTER TABLE products DROP COLUMN stock;          -- fails: 2BP01, can_fulfill de
 -- statement started, so the function does not see the order inserted by the CTE.
 BEGIN;
 WITH new_order AS (INSERT INTO orders (customer_id) VALUES (3) RETURNING id)
+
 SELECT order_total(id) FROM new_order;           -- fails: order N does not exist
 ROLLBACK;
 
@@ -193,10 +197,10 @@ ROLLBACK;
 CALL expire_pending_orders('2000-01-01', 2);                  -- p_expired 0
 
 -- The procedures and their arguments
-SELECT proname, pg_get_function_arguments(oid)
+SELECT proname, pg_get_function_arguments(oid) AS arguments
 FROM pg_proc
 WHERE prokind = 'p'                                           -- p = procedure, f = function
-  AND pronamespace = 'public'::regnamespace;
+  AND pronamespace = 'public'::REGNAMESPACE;
 
 -- ---------------------------------------------------------------------------
 -- Triggers (db/init/06_triggers.sql)
@@ -209,18 +213,18 @@ ORDER BY event_object_table, action_timing, trigger_name;
 
 -- information_schema follows the SQL standard, which has no TRUNCATE triggers,
 -- so audit_log_no_truncate is missing above. The catalog has every trigger:
-SELECT tgrelid::regclass AS table_name, tgname, pg_get_triggerdef(oid) AS definition
+SELECT tgrelid::REGCLASS AS table_name, tgname, pg_get_triggerdef(oid) AS definition
 FROM pg_trigger
 WHERE NOT tgisinternal
-ORDER BY 1, 2;
+ORDER BY table_name, tgname;
 
 BEGIN;
 -- updated_at and the audit log
 UPDATE products SET price = 200 WHERE id = 1;
 SELECT id, price, updated_at FROM products WHERE id = 1;     -- updated_at = now()
 UPDATE products SET price = price WHERE id = 2;              -- no change: no updated_at, no audit
-SELECT table_name, operation, row_id, changed_fields,
-       old_data ->> 'price' AS old_price, new_data ->> 'price' AS new_price, changed_by
+SELECT table_name, operation, row_id, changed_fields, changed_by,
+       old_data ->> 'price' AS old_price, new_data ->> 'price' AS new_price
 FROM audit_log
 WHERE transaction_id = txid_current();                        -- one row: products 1 {price}
 
@@ -289,11 +293,11 @@ ORDER BY level, c.city, ot.status;
 -- ROW_NUMBER() = 1 pattern below it.
 SELECT DISTINCT ON (customer_id) customer, order_id, status, total
 FROM order_totals
-ORDER BY customer_id, created_at DESC, order_id DESC;
+ORDER BY customer_id ASC, created_at DESC, order_id DESC;
 
 SELECT customer, order_id, status, total
 FROM (
-  SELECT ot.*, ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY created_at DESC, order_id DESC) AS rn
+  SELECT ot.*, ROW_NUMBER() OVER (PARTITION BY ot.customer_id ORDER BY ot.created_at DESC, ot.order_id DESC) AS rn
   FROM order_totals ot
 ) latest
 WHERE rn = 1;
@@ -309,17 +313,19 @@ CROSS JOIN LATERAL (
   WHERE o.customer_id = c.id
   ORDER BY oi.subtotal DESC
   LIMIT 2
-) AS top
-ORDER BY c.name, top.subtotal DESC;
+) top
+ORDER BY c.name ASC, top.subtotal DESC;
 
 -- CTE MATERIALIZED: since PostgreSQL 12 a CTE used once is inlined into the
 -- query like a subquery. MATERIALIZED forces it to be computed once and kept,
 -- which can be faster or slower: compare the plans.
+-- Inlined: one scan with both conditions
 EXPLAIN WITH paid AS (SELECT * FROM orders WHERE status = 'PAID')
-SELECT * FROM paid WHERE customer_id = 1;               -- inlined: one scan with both conditions
+SELECT * FROM paid WHERE customer_id = 1;  -- noqa: LT08
 
+-- CTE Scan over a stored result
 EXPLAIN WITH paid AS MATERIALIZED (SELECT * FROM orders WHERE status = 'PAID')
-SELECT * FROM paid WHERE customer_id = 1;               -- CTE Scan over a stored result
+SELECT * FROM paid WHERE customer_id = 1;  -- noqa: LT08
 
 -- Materialized view
 SELECT * FROM daily_sales ORDER BY day;
@@ -328,8 +334,8 @@ REFRESH MATERIALIZED VIEW CONCURRENTLY daily_sales;     -- readers keep reading 
 -- Views and materialized views in the database
 SELECT table_name, 'view' AS kind FROM information_schema.views WHERE table_schema = 'public'
 UNION ALL
-SELECT matviewname, 'materialized view' FROM pg_matviews
-ORDER BY 1;
+SELECT matviewname AS table_name, 'materialized view' AS kind FROM pg_matviews
+ORDER BY table_name;
 
 -- UPSERT
 BEGIN;
@@ -345,7 +351,7 @@ ROLLBACK;
 -- also delete. It has no RETURNING before PostgreSQL 17.
 BEGIN;
 MERGE INTO products p
-USING (VALUES ('MS-01', 'Mouse', 45.00, 0), ('HD-01', 'Headset', 80.00, 5)) AS f(sku, name, price, received)
+USING (VALUES ('MS-01', 'Mouse', 45.00, 0), ('HD-01', 'Headset', 80.00, 5)) f(sku, name, price, received)
 ON p.sku = f.sku
 WHEN MATCHED THEN
   UPDATE SET name = f.name, price = f.price, stock = p.stock + f.received
@@ -368,9 +374,9 @@ FROM pg_stat_activity
 WHERE datname = current_database() AND pid <> pg_backend_pid();
 
 -- The row locks held right now
-SELECT l.pid, l.locktype, l.relation::regclass, l.mode, l.granted
+SELECT l.pid, l.locktype, l.relation::REGCLASS, l.mode, l.granted
 FROM pg_locks l
-WHERE l.relation = 'products'::regclass;
+WHERE l.relation = 'products'::REGCLASS;
 
 -- Scenario 1: lost update (READ COMMITTED)
 --   A1  BEGIN;

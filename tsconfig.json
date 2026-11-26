@@ -1,0 +1,18 @@
+{
+  // Playwright compiles the tests itself without checking types.
+  // This config is only for `npm run typecheck` (tsc --noEmit).
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noEmit": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": ["tests/**/*.ts", "pages/**/*.ts", "playwright.config.ts", "global-setup.ts"]
+}

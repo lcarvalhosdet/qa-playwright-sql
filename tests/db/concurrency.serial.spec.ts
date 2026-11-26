@@ -68,12 +68,12 @@ const test = base.extend<{ scratch: Scratch; a: Session; b: Session }>({
     await use(scratch);
     await scratch.cleanup();
   },
-  a: async ({ scratch: _ }, use) => {
+  a: async ({ scratch: _scratch }, use) => {
     const session = await openSession();
     await use(session);
     await closeSession(session);
   },
-  b: async ({ scratch: _ }, use) => {
+  b: async ({ scratch: _scratch }, use) => {
     const session = await openSession();
     await use(session);
     await closeSession(session);
@@ -83,12 +83,14 @@ const test = base.extend<{ scratch: Scratch; a: Session; b: Session }>({
 test.describe.configure({ mode: 'serial' });
 
 // Starts a query that is expected to block, without letting a rejection go
-// unhandled while the test does other things.
-type Outcome<T> = { ok: true; value: T } | { ok: false; error: { code?: string; message: string; detail?: string } };
+// unhandled while the test does other things. The outcome has either a value
+// or an error, so a test asserts on both without an if.
+type PgError = { code?: string; message: string; detail?: string };
+type Outcome<T> = { value?: T; error?: PgError };
 function start<T>(promise: Promise<T>): Promise<Outcome<T>> {
   return promise.then(
-    (value) => ({ ok: true as const, value }),
-    (error) => ({ ok: false as const, error }),
+    (value) => ({ value }),
+    (error: PgError) => ({ error }),
   );
 }
 
@@ -143,7 +145,8 @@ test.describe('lost update', () => {
     // After the lock is released, READ COMMITTED re-reads the committed row
     // (4) and applies its own change to it.
     const outcome = await second;
-    expect(outcome.ok && outcome.value.rows[0].stock).toBe(3);
+    expect(outcome.error).toBeUndefined();
+    expect(outcome.value?.rows[0].stock).toBe(3);
     expect(await stockOf(db, product)).toBe(3);
   });
 
@@ -160,7 +163,8 @@ test.describe('lost update', () => {
     await a.client.query('COMMIT');
 
     const outcome = await readByB;
-    const seenByB = outcome.ok ? outcome.value.rows[0].stock : NaN;
+    expect(outcome.error).toBeUndefined();
+    const seenByB: number = outcome.value?.rows[0].stock;
     expect(seenByB).toBe(4); // not the stale 5
     await b.client.query('UPDATE products SET stock = $2 WHERE id = $1', [product, seenByB - 1]);
     await b.client.query('COMMIT');
@@ -217,43 +221,57 @@ test.describe('isolation levels', () => {
   // before either writes see 0, and both place an order. No row is written by
   // both, so row locks do not help. Each orders a different product, so
   // place_order's own locks do not get in the way either.
-  for (const level of ['REPEATABLE READ', 'SERIALIZABLE'] as const) {
-    test(`write skew under ${level}`, async ({ db, scratch, a, b }) => {
-      const customer = await scratch.customer();
-      const [p1, p2] = [await scratch.product(5), await scratch.product(5)];
-      const countPending = `SELECT COUNT(*)::int AS n FROM orders WHERE customer_id = $1 AND status = 'PENDING'`;
+  test('write skew: REPEATABLE READ lets both sessions break the rule', async ({ db, scratch, a, b }) => {
+    const { outcomes, pending } = await raceForOnePendingOrder(db, scratch, a, b, 'REPEATABLE READ');
 
-      await a.client.query(`BEGIN ISOLATION LEVEL ${level}`);
-      await b.client.query(`BEGIN ISOLATION LEVEL ${level}`);
-      expect((await a.client.query(countPending, [customer])).rows[0].n).toBe(0);
-      expect((await b.client.query(countPending, [customer])).rows[0].n).toBe(0);
+    expect(outcomes.map((o) => o.error)).toEqual([undefined, undefined]);
+    expect(pending).toBe(2); // the rule is broken
+  });
 
-      const run = async (s: Session, product: number) =>
-        start(
-          (async () => {
-            await s.client.query('CALL place_order($1, $2)', [customer, items(product)]);
-            await s.client.query('COMMIT');
-          })(),
-        );
-      const outcomes = [await run(a, p1), await run(b, p2)];
-      await a.client.query('ROLLBACK').catch(() => {});
-      await b.client.query('ROLLBACK').catch(() => {});
+  test('write skew: SERIALIZABLE fails one session with 40001', async ({ db, scratch, a, b }) => {
+    const { outcomes, pending } = await raceForOnePendingOrder(db, scratch, a, b, 'SERIALIZABLE');
 
-      const pending = (await db.query(countPending, [customer])).rows[0].n;
-      if (level === 'REPEATABLE READ') {
-        expect(outcomes.every((o) => o.ok)).toBe(true);
-        expect(pending).toBe(2); // the rule is broken
-      } else {
-        // SERIALIZABLE sees that each transaction read what the other wrote
-        // and fails one. Retrying it would count 1 and place no order.
-        const failed = outcomes.filter((o) => !o.ok);
-        expect(failed).toHaveLength(1);
-        expect(failed[0].ok === false && failed[0].error.code).toBe('40001');
-        expect(pending).toBe(1);
-      }
-    });
-  }
+    // SERIALIZABLE sees that each transaction read what the other wrote and
+    // fails one. Retrying it would count 1 and place no order.
+    const codes = outcomes.filter((o) => o.error).map((o) => o.error?.code);
+    expect(codes).toEqual(['40001']);
+    expect(pending).toBe(1);
+  });
 });
+
+// Both sessions count the customer's PENDING orders, both see 0, then each
+// places an order and commits. Returns how each session ended and how many
+// PENDING orders were saved.
+async function raceForOnePendingOrder(
+  db: Client,
+  scratch: Scratch,
+  a: Session,
+  b: Session,
+  level: 'REPEATABLE READ' | 'SERIALIZABLE',
+): Promise<{ outcomes: Outcome<void>[]; pending: number }> {
+  const customer = await scratch.customer();
+  const [p1, p2] = [await scratch.product(5), await scratch.product(5)];
+  const countPending = `SELECT COUNT(*)::int AS n FROM orders WHERE customer_id = $1 AND status = 'PENDING'`;
+
+  await a.client.query(`BEGIN ISOLATION LEVEL ${level}`);
+  await b.client.query(`BEGIN ISOLATION LEVEL ${level}`);
+  expect((await a.client.query(countPending, [customer])).rows[0].n).toBe(0);
+  expect((await b.client.query(countPending, [customer])).rows[0].n).toBe(0);
+
+  const placeAndCommit = (s: Session, product: number) =>
+    start(
+      (async () => {
+        await s.client.query('CALL place_order($1, $2)', [customer, items(product)]);
+        await s.client.query('COMMIT');
+      })(),
+    );
+  const outcomes = [await placeAndCommit(a, p1), await placeAndCommit(b, p2)];
+  await a.client.query('ROLLBACK').catch(() => {});
+  await b.client.query('ROLLBACK').catch(() => {});
+
+  const pending: number = (await db.query(countPending, [customer])).rows[0].n;
+  return { outcomes, pending };
+}
 
 test.describe('deadlocks', () => {
   test('two transactions locking rows in opposite order deadlock, and one is aborted', async ({ db, scratch, a, b }) => {
@@ -270,10 +288,8 @@ test.describe('deadlocks', () => {
     // After deadlock_timeout (1s by default) PostgreSQL finds the cycle and
     // aborts one of the two, which lets the other go on.
     const outcomes = await Promise.all([aWantsY, bWantsX]);
-    const failed = outcomes.filter((o) => !o.ok);
-    expect(failed).toHaveLength(1);
-    expect(failed[0].ok === false && failed[0].error.code).toBe('40P01');
-    expect(outcomes.filter((o) => o.ok)).toHaveLength(1);
+    const codes = outcomes.map((o) => o.error?.code).sort();
+    expect(codes).toEqual(['40P01', undefined]); // one aborted, one went on
   });
 
   test('place_order locks in id order, so opposite item orders wait instead of deadlocking', async ({ db, scratch, a, b }) => {
@@ -288,7 +304,7 @@ test.describe('deadlocks', () => {
     await waitUntilBlocked(db, b, a);
     await a.client.query('COMMIT');
 
-    expect((await second).ok).toBe(true);
+    expect((await second).error).toBeUndefined();
     expect([await stockOf(db, x), await stockOf(db, y)]).toEqual([8, 8]);
   });
 });
@@ -307,8 +323,7 @@ test.describe('the last unit', () => {
 
     // b waited on the row lock, then read the committed stock: 0.
     const outcome = await second;
-    expect(outcome.ok).toBe(false);
-    expect(outcome.ok === false && outcome.error).toMatchObject({ code: 'SH001', detail: 'requested 1, in stock 0' });
+    expect(outcome.error).toMatchObject({ code: 'SH001', detail: 'requested 1, in stock 0' });
 
     expect(await stockOf(db, product)).toBe(0);
     const { rows } = await db.query(

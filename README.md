@@ -43,25 +43,39 @@ Two bugs were found this way and fixed: the batch job picked the same orders whe
 
 ## Run it
 
-Requirements: Node.js 20 or newer and Docker.
+Requirements: Node.js 22.22 or newer and Docker running. Nothing else: the tests start their own PostgreSQL.
 
 ```bash
 npm ci
 npx playwright install chromium
-docker compose up -d     # PostgreSQL with everything in db/init
 npm test                 # all tests
-npm run test:web         # UI and API only, no database needed
+npm run test:web         # UI and API only, no database
 npm run test:db          # database only
 npm run report           # open the HTML report
 ```
 
-The scripts in `db/init` run only when the database is created. After changing them, recreate it:
+`global-setup.ts` starts a fresh PostgreSQL 16 with [Testcontainers](https://testcontainers.com) for every run, loads everything in `db/init`, and removes it at the end. It listens on a random free port, so it never clashes with another database on 5432. To run against a database you already have instead, set `DB_URL`:
 
 ```bash
-docker compose down -v && docker compose up -d
+DB_URL=postgresql://qa:qa@localhost:5432/shop npm test
 ```
 
-If port 5432 is taken, map another port in `docker-compose.yml` and point the tests at it with `DB_URL=postgresql://qa:qa@localhost:5433/shop`.
+`docker-compose.yml` is still there for exploring the database by hand in DBeaver or psql (`docker compose up -d`, port 5432). Its scripts run only when the volume is created, so after changing `db/init` recreate it with `docker compose down -v && docker compose up -d`.
+
+### Checks
+
+```bash
+pip install -r requirements-dev.txt   # sqlfluff, once
+npm run check                         # typecheck + lint + lint:sql
+```
+
+| Script | What it runs |
+| --- | --- |
+| `npm run typecheck` | `tsc` in strict mode. Playwright runs TypeScript without checking types, so this is the only place a type error shows up. |
+| `npm run lint` | ESLint with the TypeScript and Playwright recommended rules (no conditionals in tests, no tests without assertions, no missing `await`). |
+| `npm run lint:sql` | sqlfluff on `db/init` and `sql`, PostgreSQL dialect. `.sqlfluff` lists the rules left out and why. |
+
+CI runs the checks and the tests as two parallel jobs.
 
 ## Structure
 
@@ -80,7 +94,10 @@ tests/db/expire.serial.spec.ts      batch job that commits (db-serial project)
 tests/db/concurrency.serial.spec.ts two sessions at once: locks, isolation, deadlocks (db-serial project)
 db/init/                            schema, indexes, seed, functions, procedures, triggers, views, concurrency
 sql/queries.sql                     examples of everything above for DBeaver or psql
-.github/workflows/tests.yml         CI with a PostgreSQL service
+global-setup.ts                     starts PostgreSQL with Testcontainers when DB_URL is not set
+.github/workflows/tests.yml         CI: checks job and tests job
+.sqlfluff, eslint.config.mjs        lint rules for SQL and TypeScript
+tsconfig.json                       strict type check
 ```
 
 ## Choices
@@ -88,4 +105,5 @@ sql/queries.sql                     examples of everything above for DBeaver or 
 - Locators by role, placeholder and test id; no XPath and no fixed waits.
 - A page object keeps the login selectors in one place.
 - Database tests share one connection per worker and roll back what they write. The few that must commit or hold locks across connections run in their own project, after the rest.
+- Every run gets a fresh database from Testcontainers, the same locally and in CI, so no test depends on what an earlier run left behind.
 - CI uploads the HTML report as an artifact, so a failure can be inspected without running it locally.

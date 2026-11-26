@@ -37,7 +37,7 @@ ALTER TABLE orders
 -- ---------------------------------------------------------------------------
 -- One generic function, attached to two tables.
 CREATE FUNCTION set_updated_at()
-RETURNS trigger
+RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 BEGIN
@@ -81,7 +81,7 @@ INSERT INTO order_status_transitions (from_status, to_status) VALUES
   ('PAID',    'CANCELLED');
 
 CREATE FUNCTION check_status_transition()
-RETURNS trigger
+RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 BEGIN
@@ -126,7 +126,7 @@ CREATE TABLE audit_log (
 CREATE INDEX audit_log_row_idx ON audit_log (table_name, row_id);
 
 CREATE FUNCTION audit_row()
-RETURNS trigger
+RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 DECLARE
@@ -174,7 +174,7 @@ CREATE TRIGGER payments_audit
 -- 4. Append-only: an audit log nobody can rewrite
 -- ---------------------------------------------------------------------------
 CREATE FUNCTION forbid_change()
-RETURNS trigger
+RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 BEGIN
@@ -208,7 +208,7 @@ CREATE TABLE stock_alerts (
 );
 
 CREATE FUNCTION raise_stock_alerts()
-RETURNS trigger
+RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 BEGIN
@@ -246,7 +246,7 @@ CREATE TRIGGER products_stock_alerts
 -- Limit: it checks new orders only. Deleting the last item of an existing
 -- order would need the same trigger on order_items.
 CREATE FUNCTION check_order_has_items()
-RETURNS trigger
+RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 BEGIN

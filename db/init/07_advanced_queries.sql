@@ -37,21 +37,21 @@ CREATE TABLE categories (
 --     └── Cables
 INSERT INTO categories (name) VALUES ('Electronics');
 INSERT INTO categories (name, parent_id)
-SELECT child, (SELECT id FROM categories WHERE name = parent)
-FROM (VALUES ('Computers', 'Electronics'), ('Accessories', 'Electronics')) AS v(child, parent);
+SELECT v.child, (SELECT c.id FROM categories c WHERE c.name = v.parent) AS parent_id
+FROM (VALUES ('Computers', 'Electronics'), ('Accessories', 'Electronics')) v(child, parent);
 INSERT INTO categories (name, parent_id)
-SELECT child, (SELECT id FROM categories WHERE name = parent)
-FROM (VALUES ('Peripherals', 'Computers'), ('Monitors', 'Computers'), ('Cables', 'Accessories')) AS v(child, parent);
+SELECT v.child, (SELECT c.id FROM categories c WHERE c.name = v.parent) AS parent_id
+FROM (VALUES ('Peripherals', 'Computers'), ('Monitors', 'Computers'), ('Cables', 'Accessories')) v(child, parent);
 INSERT INTO categories (name, parent_id)
-SELECT child, (SELECT id FROM categories WHERE name = parent)
-FROM (VALUES ('Keyboards', 'Peripherals'), ('Mice', 'Peripherals')) AS v(child, parent);
+SELECT v.child, (SELECT c.id FROM categories c WHERE c.name = v.parent) AS parent_id
+FROM (VALUES ('Keyboards', 'Peripherals'), ('Mice', 'Peripherals')) v(child, parent);
 
 ALTER TABLE products ADD COLUMN category_id INTEGER REFERENCES categories (id);
 CREATE INDEX products_category_id_idx ON products (category_id);
 
 UPDATE products p
 SET category_id = c.id
-FROM (VALUES ('KB-01', 'Keyboards'), ('MS-01', 'Mice'), ('MN-01', 'Monitors'), ('CB-01', 'Cables')) AS v(sku, category)
+FROM (VALUES ('KB-01', 'Keyboards'), ('MS-01', 'Mice'), ('MN-01', 'Monitors'), ('CB-01', 'Cables')) v(sku, category)
 JOIN categories c ON c.name = v.category
 WHERE p.sku = v.sku;
 
@@ -64,16 +64,17 @@ WHERE p.sku = v.sku;
 --                  until a step adds none
 CREATE VIEW category_tree AS
 WITH RECURSIVE tree AS (
-  SELECT id, name, parent_id, 0 AS depth, name::text AS path
+  SELECT id, name, parent_id, 0 AS depth, name::TEXT AS path
   FROM categories
   WHERE parent_id IS NULL
 
   UNION ALL
 
-  SELECT c.id, c.name, c.parent_id, t.depth + 1, t.path || ' > ' || c.name
+  SELECT c.id, c.name, c.parent_id, t.depth + 1 AS depth, t.path || ' > ' || c.name AS path
   FROM categories c
   JOIN tree t ON c.parent_id = t.id
 )
+
 SELECT id, name, parent_id, depth, path FROM tree;
 
 -- Walking up from a category to the root. If bad data made a loop
@@ -116,9 +117,9 @@ SELECT o.id                                          AS order_id,
        c.name                                        AS customer,
        o.status,
        o.created_at,
-       (o.created_at AT TIME ZONE 'America/Recife')::date AS order_date,
-       COUNT(oi.product_id)::int                     AS items,
-       COALESCE(SUM(oi.subtotal), 0)::numeric(12,2)  AS total
+       (o.created_at AT TIME ZONE 'America/Recife')::DATE AS order_date,
+       COUNT(oi.product_id)::INT                     AS items,
+       COALESCE(SUM(oi.subtotal), 0)::NUMERIC(12,2)  AS total
 FROM orders o
 JOIN customers c         ON c.id = o.customer_id
 LEFT JOIN order_items oi ON oi.order_id = o.id
@@ -142,7 +143,7 @@ SELECT customer_id,
        order_id,
        order_date,
        total,
-       ROW_NUMBER() OVER w ::int                                            AS order_number,
+       ROW_NUMBER() OVER w ::INT                                            AS order_number,
        SUM(total)   OVER (w ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_total,
        order_date - LAG(order_date) OVER w                                  AS days_since_previous,
        ROUND(total / NULLIF(SUM(total) OVER (PARTITION BY customer_id), 0), 2) AS share_of_customer
@@ -163,18 +164,20 @@ WITH sold AS (
   WHERE o.status <> 'CANCELLED'
   GROUP BY oi.product_id
 ),
+
 per_product AS (
   -- LEFT JOIN keeps the products that never sold, with 0.
   SELECT p.id AS product_id, p.sku, p.name, p.category_id,
-         COALESCE(s.units, 0)::int              AS units,
-         COALESCE(s.revenue, 0)::numeric(12,2)  AS revenue
+         COALESCE(s.units, 0)::INT              AS units,
+         COALESCE(s.revenue, 0)::NUMERIC(12,2)  AS revenue
   FROM products p
   LEFT JOIN sold s ON s.product_id = p.id
 )
+
 SELECT product_id, sku, name, category_id, units, revenue,
-       ROW_NUMBER() OVER (ORDER BY revenue DESC, sku)::int AS row_number,
-       RANK()       OVER (ORDER BY revenue DESC)::int      AS rank,
-       DENSE_RANK() OVER (ORDER BY revenue DESC)::int      AS dense_rank,
+       ROW_NUMBER() OVER (ORDER BY revenue DESC, sku ASC)::INT AS row_number,
+       RANK()       OVER (ORDER BY revenue DESC)::INT      AS rank,
+       DENSE_RANK() OVER (ORDER BY revenue DESC)::INT      AS dense_rank,
        ROUND(100 * revenue / NULLIF(SUM(revenue) OVER (), 0), 1) AS pct_of_revenue
 FROM per_product;
 
@@ -193,12 +196,13 @@ WITH RECURSIVE closure AS (
   FROM closure cl
   JOIN categories c ON c.parent_id = cl.category_id
 )
+
 SELECT t.id,
        t.path,
        t.depth,
-       COUNT(ps.product_id)::int                  AS products,
-       COALESCE(SUM(ps.units), 0)::int            AS units,
-       COALESCE(SUM(ps.revenue), 0)::numeric(12,2) AS revenue
+       COUNT(ps.product_id)::INT                  AS products,
+       COALESCE(SUM(ps.units), 0)::INT            AS units,
+       COALESCE(SUM(ps.revenue), 0)::NUMERIC(12,2) AS revenue
 FROM category_tree t
 JOIN closure cl          ON cl.ancestor_id = t.id
 LEFT JOIN product_sales ps ON ps.category_id = cl.category_id
@@ -218,7 +222,7 @@ GROUP BY t.id, t.path, t.depth;
 CREATE VIEW revenue_by_city AS
 SELECT CASE WHEN GROUPING(c.city) = 1 THEN 'All cities'    ELSE c.city END AS city,
        CASE WHEN GROUPING(c.name) = 1 THEN 'All customers' ELSE c.name END AS customer,
-       SUM(ot.total)::numeric(12,2) AS revenue,
+       SUM(ot.total)::NUMERIC(12,2) AS revenue,
        GROUPING(c.city, c.name)     AS level
 FROM order_totals ot
 JOIN customers c ON c.id = ot.customer_id
@@ -241,13 +245,13 @@ GROUP BY ROLLUP (c.city, c.name);
 -- without orders does not shift the window, as ROWS 6 PRECEDING would.
 CREATE MATERIALIZED VIEW daily_sales AS
 SELECT order_date                 AS day,
-       COUNT(*)::int              AS orders,
-       SUM(total)::numeric(12,2)  AS revenue,
+       COUNT(*)::INT              AS orders,
+       SUM(total)::NUMERIC(12,2)  AS revenue,
        ROUND(AVG(total), 2)       AS avg_ticket,
        SUM(SUM(total)) OVER (
          ORDER BY order_date
          RANGE BETWEEN INTERVAL '6 days' PRECEDING AND CURRENT ROW
-       )::numeric(12,2)           AS revenue_7d
+       )::NUMERIC(12,2)           AS revenue_7d
 FROM order_totals
 WHERE status <> 'CANCELLED'
 GROUP BY order_date;

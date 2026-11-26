@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { Client, type NoticeMessage } from 'pg';
+import { Client } from 'pg';
 import { test, expect, DB_URL } from './db.fixture';
 
 // expire_pending_orders commits after each batch, so it cannot run inside the
@@ -80,7 +80,8 @@ test('expires old PENDING orders in batches, one transaction per batch', async (
   try {
     // RAISE NOTICE messages arrive on the connection, one per batch.
     const notices: string[] = [];
-    const onNotice = (notice: NoticeMessage) => notices.push(notice.message ?? '');
+    // The notice type lives in pg-protocol, which pg does not re-export.
+    const onNotice = (notice: { message?: string }) => notices.push(notice.message ?? '');
     db.on('notice', onNotice);
     let expired: number;
     try {

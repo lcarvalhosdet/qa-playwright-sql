@@ -1,0 +1,2 @@
+# Python tools used in development and CI
+sqlfluff==4.5.0

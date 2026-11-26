@@ -203,7 +203,7 @@ test.describe('orders must have items (deferred constraint trigger)', () => {
         'INSERT INTO order_items (order_id, product_id, quantity, unit_price) VALUES ($1, 1, 1, 150)',
         [rows[0].id],
       );
-      await db.query('SET CONSTRAINTS orders_must_have_items IMMEDIATE');
+      await expect(db.query('SET CONSTRAINTS orders_must_have_items IMMEDIATE')).resolves.toBeDefined();
     });
   });
 

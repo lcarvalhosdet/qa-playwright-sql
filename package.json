@@ -3,16 +3,29 @@
   "version": "1.0.0",
   "description": "UI, API and database tests with Playwright, TypeScript and PostgreSQL",
   "private": true,
+  "engines": {
+    "node": ">=22.22"
+  },
   "scripts": {
     "test": "playwright test",
     "test:web": "playwright test --project=ui --project=api",
     "test:db": "playwright test --project=db --project=db-serial",
-    "report": "playwright show-report"
+    "report": "playwright show-report",
+    "typecheck": "tsc -p .",
+    "lint": "eslint .",
+    "lint:sql": "sqlfluff lint db/init sql",
+    "check": "npm run typecheck && npm run lint && npm run lint:sql"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@playwright/test": "^1.65.1",
+    "@testcontainers/postgresql": "^12.2.2",
     "@types/node": "^26.6.11",
     "@types/pg": "^8.23.1",
-    "pg": "^8.23.1"
+    "eslint": "^10.15.0",
+    "eslint-plugin-playwright": "^2.12.2",
+    "pg": "^8.23.1",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.74.0"
   }
 }

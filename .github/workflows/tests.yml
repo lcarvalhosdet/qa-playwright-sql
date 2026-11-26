@@ -6,34 +6,47 @@ on:
   workflow_dispatch:
 
 jobs:
-  test:
+  # Fast checks that need no browser and no database.
+  lint:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: qa
-          POSTGRES_PASSWORD: qa
-          POSTGRES_DB: shop
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U qa -d shop"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-
-    env:
-      DB_URL: postgresql://qa:qa@localhost:5432/shop
-
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          pip install -r requirements-dev.txt
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Lint TypeScript
+        run: npm run lint
+
+      - name: Lint SQL
+        run: npm run lint:sql
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
           cache: npm
 
       - name: Install dependencies
@@ -42,14 +55,8 @@ jobs:
       - name: Install Chromium
         run: npx playwright install --with-deps chromium
 
-      # Same order as docker-entrypoint-initdb.d: 01_schema, 02_indexes, 03_seed
-      - name: Load schema, indexes and seed
-        run: |
-          for file in db/init/*.sql; do
-            echo "Running $file"
-            psql "$DB_URL" -v ON_ERROR_STOP=1 -q -f "$file"
-          done
-
+      # No database service here: global-setup.ts starts PostgreSQL with
+      # Testcontainers, using the Docker that the runner already has.
       - name: Run tests
         run: npm test
 

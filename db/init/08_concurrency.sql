@@ -41,7 +41,7 @@ ALTER TABLE products ADD COLUMN version INTEGER NOT NULL DEFAULT 1;
 -- Every real change bumps the version, whoever makes it: the price form,
 -- place_order taking stock, the import. Named 30 to run after updated_at (20).
 CREATE FUNCTION bump_version()
-RETURNS trigger
+RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 BEGIN

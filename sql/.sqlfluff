@@ -1,0 +1,5 @@
+# sql/queries.sql is a study file: SELECT * is used on purpose to show whole
+# rows, so AM04 is off here. The other excluded rules are the same as in the
+# root .sqlfluff (an exclude_rules list replaces the parent one, it does not add to it).
+[sqlfluff]
+exclude_rules = LT01, LT02, LT09, LT14, CP03, RF04, AM05, ST09, AM04
