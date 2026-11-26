@@ -197,3 +197,58 @@ SELECT proname, pg_get_function_arguments(oid)
 FROM pg_proc
 WHERE prokind = 'p'                                           -- p = procedure, f = function
   AND pronamespace = 'public'::regnamespace;
+
+-- ---------------------------------------------------------------------------
+-- Triggers (db/init/06_triggers.sql)
+-- ---------------------------------------------------------------------------
+
+-- The triggers of each table, in firing order (same timing fires by name)
+SELECT event_object_table AS table_name, trigger_name, action_timing, event_manipulation, action_orientation
+FROM information_schema.triggers
+ORDER BY event_object_table, action_timing, trigger_name;
+
+-- information_schema follows the SQL standard, which has no TRUNCATE triggers,
+-- so audit_log_no_truncate is missing above. The catalog has every trigger:
+SELECT tgrelid::regclass AS table_name, tgname, pg_get_triggerdef(oid) AS definition
+FROM pg_trigger
+WHERE NOT tgisinternal
+ORDER BY 1, 2;
+
+BEGIN;
+-- updated_at and the audit log
+UPDATE products SET price = 200 WHERE id = 1;
+SELECT id, price, updated_at FROM products WHERE id = 1;     -- updated_at = now()
+UPDATE products SET price = price WHERE id = 2;              -- no change: no updated_at, no audit
+SELECT table_name, operation, row_id, changed_fields,
+       old_data ->> 'price' AS old_price, new_data ->> 'price' AS new_price, changed_by
+FROM audit_log
+WHERE transaction_id = txid_current();                        -- one row: products 1 {price}
+
+-- Everything a procedure changed, grouped by its transaction
+CALL place_order(1, '[{"product_id": 3, "quantity": 1}]');
+SELECT table_name, operation, row_id, changed_fields
+FROM audit_log
+WHERE transaction_id = txid_current()
+ORDER BY id;
+
+-- Statement trigger with transition tables: the monitor went from 3 to 2,
+-- reaching its reorder level of 2
+SELECT * FROM stock_alerts;
+ROLLBACK;
+
+-- Status rules hold even for a plain UPDATE: run one at a time
+UPDATE orders SET status = 'SHIPPED' WHERE id = 2;           -- SH002 PENDING to SHIPPED
+UPDATE orders SET status = 'PAID' WHERE id = 4;              -- SH002 CANCELLED to PAID
+SELECT * FROM order_status_transitions ORDER BY from_status, to_status;
+
+-- Append-only
+UPDATE audit_log SET operation = 'X';                        -- SH004 (if the log has rows)
+TRUNCATE audit_log;                                          -- SH004
+
+-- Deferred constraint trigger: checked at COMMIT
+INSERT INTO orders (customer_id) VALUES (3);                 -- SH003 at the implicit COMMIT
+
+BEGIN;
+INSERT INTO orders (customer_id) VALUES (3);                 -- succeeds for now
+SET CONSTRAINTS orders_must_have_items IMMEDIATE;            -- SH003: check runs here
+ROLLBACK;
