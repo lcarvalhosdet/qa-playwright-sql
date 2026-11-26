@@ -43,5 +43,13 @@ export default defineConfig({
       dependencies: ['db'],
       workers: 1,
     },
+    {
+      // End-to-end: the shop API (api/src) over HTTP, then the database.
+      // global-setup.ts starts the API. The API commits, so this runs after
+      // the "db" tests, on data each test creates.
+      name: 'shop-api',
+      testDir: './tests/shop-api',
+      dependencies: ['db'],
+    },
   ],
 });

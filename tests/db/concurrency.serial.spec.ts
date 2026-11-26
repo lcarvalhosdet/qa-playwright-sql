@@ -1,6 +1,6 @@
-import { randomUUID } from 'node:crypto';
 import { Client } from 'pg';
 import { test as base, expect, DB_URL } from './db.fixture';
+import { Scratch } from './scratch';
 
 // Concurrency: two sessions, "a" and "b", each with its own connection, run
 // interleaved transactions while the worker connection "db" watches.
@@ -16,37 +16,6 @@ import { test as base, expect, DB_URL } from './db.fixture';
 //   55P03 lock_not_available      SH001 insufficient stock   SH005 stale version
 
 type Session = { client: Client; pid: number };
-
-// Products and customers made for one test, removed when it ends.
-class Scratch {
-  private products: number[] = [];
-  private customers: number[] = [];
-  constructor(private db: Client) {}
-
-  async product(stock: number): Promise<number> {
-    const { rows } = await this.db.query(
-      `INSERT INTO products (sku, name, price, stock) VALUES ($1, 'Race item', 10, $2) RETURNING id`,
-      [`RC-${randomUUID().slice(0, 8)}`, stock],
-    );
-    this.products.push(rows[0].id);
-    return rows[0].id;
-  }
-
-  async customer(): Promise<number> {
-    const { rows } = await this.db.query(
-      `INSERT INTO customers (name, email) VALUES ('Race test', $1) RETURNING id`,
-      [`race-${randomUUID().slice(0, 8)}@example.com`],
-    );
-    this.customers.push(rows[0].id);
-    return rows[0].id;
-  }
-
-  async cleanup(): Promise<void> {
-    await this.db.query('DELETE FROM orders WHERE customer_id = ANY($1)', [this.customers]);
-    await this.db.query('DELETE FROM products WHERE id = ANY($1)', [this.products]);
-    await this.db.query('DELETE FROM customers WHERE id = ANY($1)', [this.customers]);
-  }
-}
 
 async function openSession(): Promise<Session> {
   const client = new Client({ connectionString: DB_URL });

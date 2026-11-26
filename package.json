@@ -10,7 +10,9 @@
     "test": "playwright test",
     "test:web": "playwright test --project=ui --project=api",
     "test:db": "playwright test --project=db --project=db-serial",
+    "test:api": "playwright test --project=shop-api",
     "report": "playwright show-report",
+    "api": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON api/src/main.ts",
     "typecheck": "tsc -p .",
     "lint": "eslint .",
     "lint:sql": "sqlfluff lint db/init sql",
@@ -27,5 +29,8 @@
     "pg": "^8.23.1",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.74.0"
+  },
+  "dependencies": {
+    "fastify": "^5.12.8"
   }
 }

@@ -2,15 +2,18 @@
 
 [![tests](https://github.com/lcarvalhosdet/qa-playwright-sql/actions/workflows/tests.yml/badge.svg)](https://github.com/lcarvalhosdet/qa-playwright-sql/actions/workflows/tests.yml)
 
-UI, API and database tests in one Playwright project, written in TypeScript and run on every push with GitHub Actions. The database part is the largest: a small PostgreSQL shop whose business rules live in the database (constraints, functions, procedures, triggers, views), with tests for each rule, including what happens when several sessions run at once.
+UI, API and database tests in one Playwright project, written in TypeScript and run on every push with GitHub Actions. At its center is a small PostgreSQL shop whose business rules live in the database (constraints, functions, procedures, triggers, views), a REST API over it, and tests that follow a request from HTTP down to the rows it changed, including what happens when several sessions run at once.
 
 ## What it tests
 
 | Layer | Target | Tests |
 | --- | --- | --- |
-| UI | [Sauce Demo](https://www.saucedemo.com) | login and add to cart, locked-out user error, sort by price |
-| API | [JSONPlaceholder](https://jsonplaceholder.typicode.com) | GET a post, POST a post, 404 for a missing post |
-| Database | PostgreSQL 16 in Docker | constraints and indexes, functions, stored procedures, triggers, reporting views, upsert, concurrency (lost updates, isolation levels, deadlocks, optimistic and advisory locks) |
+| Shop API, end to end | the project's own API (`api/`) over the shop database | create, pay and cancel orders, then check stock, payments and the audit log in the database; error codes mapped to HTTP statuses; request validation; optimistic locking; two orders racing for the last unit |
+| Database | PostgreSQL 16 | constraints and indexes, functions, stored procedures, triggers, reporting views, upsert, concurrency (lost updates, isolation levels, deadlocks, optimistic and advisory locks) |
+| UI | [Sauce Demo](https://www.saucedemo.com), a public demo store | login and add to cart, locked-out user error, sort by price |
+| API | [JSONPlaceholder](https://jsonplaceholder.typicode.com), a public fake API | GET a post, POST a post, 404 for a missing post |
+
+The UI and public API tests are examples against well-known practice sites; they do not touch the shop database.
 
 ## Database
 
@@ -41,6 +44,32 @@ Every file starts with a comment that explains its concepts, and [`sql/queries.s
 
 Two bugs were found this way and fixed: the batch job picked the same orders when two runs overlapped (fixed with `SKIP LOCKED`, and a test that fails without it), and an inlining test that depended on table statistics.
 
+## Shop API
+
+A small [Fastify](https://fastify.dev) app in `api/src` with no business rules of its own: each route calls a procedure, function or view from `db/init`, and one table in `api/src/errors.ts` turns the database's SQLSTATE codes into HTTP statuses.
+
+| Method and path | Calls | Errors |
+| --- | --- | --- |
+| `GET /health` | `SELECT 1` | |
+| `GET /products`, `GET /products/:id` | `products` | 404 |
+| `PATCH /products/:id/price` `{price, version}` | `update_product_price` | 409 `SH005` stale version, 400 invalid body |
+| `POST /orders` `{customerId, items: [{productId, quantity}]}` | `CALL place_order` | 409 `SH001` stock, 404 unknown customer or product, 422 duplicate product, 400 invalid body |
+| `GET /orders/:id` | `order_totals`, `order_items`, `payments` | 404 |
+| `POST /orders/:id/payment` `{method}` | `CALL pay_order` | 409 `SH002` not pending, 400 unknown method |
+| `POST /orders/:id/cancel` | `CALL cancel_order` | 409 `SH002` already cancelled |
+| `GET /reports/product-sales`, `GET /reports/category-sales` | the reporting views | |
+
+Errors share one shape: `{"error": "...", "code": "SH001", "detail": "...", "hint": "..."}`. Money is a string (`"150.00"`), as PostgreSQL returns `NUMERIC`. Request bodies are checked by JSON schemas, and unknown fields are rejected: Fastify drops them silently by default, which a test caught.
+
+The tests start the API themselves. To try it by hand:
+
+```bash
+docker compose up -d     # the database on port 5432
+npm run api              # http://127.0.0.1:3000
+curl -X POST localhost:3000/orders -H 'content-type: application/json' \
+  -d '{"customerId": 1, "items": [{"productId": 1, "quantity": 2}]}'
+```
+
 ## Run it
 
 Requirements: Node.js 22.22 or newer and Docker running. Nothing else: the tests start their own PostgreSQL.
@@ -51,10 +80,11 @@ npx playwright install chromium
 npm test                 # all tests
 npm run test:web         # UI and API only, no database
 npm run test:db          # database only
+npm run test:api         # shop API end to end (runs the db tests first)
 npm run report           # open the HTML report
 ```
 
-`global-setup.ts` starts a fresh PostgreSQL 16 with [Testcontainers](https://testcontainers.com) for every run, loads everything in `db/init`, and removes it at the end. It listens on a random free port, so it never clashes with another database on 5432. To run against a database you already have instead, set `DB_URL`:
+`global-setup.ts` starts a fresh PostgreSQL 16 with [Testcontainers](https://testcontainers.com) for every run, loads everything in `db/init`, starts the shop API on top of it, and removes both at the end. Both listen on random free ports, so they never clash with anything on 5432 or 3000. To run against a database you already have instead, set `DB_URL` (and `SHOP_API_URL` for an API already running):
 
 ```bash
 DB_URL=postgresql://qa:qa@localhost:5432/shop npm test
@@ -83,7 +113,10 @@ CI runs the checks and the tests as two parallel jobs.
 pages/login-page.ts                 page object for the login screen
 tests/ui/                           UI tests (Sauce Demo)
 tests/api/                          API tests (JSONPlaceholder)
+api/src/                            the shop API: app, error mapping, routes
+tests/shop-api/                     end-to-end tests: HTTP request, then database checks
 tests/db/db.fixture.ts              worker-scoped pg connection and a rolled-back transaction helper
+tests/db/scratch.ts                 test data that commits for real, removed after each test
 tests/db/orders.spec.ts             queries and data-quality checks
 tests/db/schema.spec.ts             constraints and index usage
 tests/db/functions.spec.ts          functions: results, errors, volatility, inlining
@@ -94,7 +127,7 @@ tests/db/expire.serial.spec.ts      batch job that commits (db-serial project)
 tests/db/concurrency.serial.spec.ts two sessions at once: locks, isolation, deadlocks (db-serial project)
 db/init/                            schema, indexes, seed, functions, procedures, triggers, views, concurrency
 sql/queries.sql                     examples of everything above for DBeaver or psql
-global-setup.ts                     starts PostgreSQL with Testcontainers when DB_URL is not set
+global-setup.ts                     starts PostgreSQL (Testcontainers) and the shop API for the run
 .github/workflows/tests.yml         CI: checks job and tests job
 .sqlfluff, eslint.config.mjs        lint rules for SQL and TypeScript
 tsconfig.json                       strict type check
@@ -104,6 +137,7 @@ tsconfig.json                       strict type check
 
 - Locators by role, placeholder and test id; no XPath and no fixed waits.
 - A page object keeps the login selectors in one place.
-- Database tests share one connection per worker and roll back what they write. The few that must commit or hold locks across connections run in their own project, after the rest.
+- Database tests share one connection per worker and roll back what they write. The ones that must commit, hold locks across connections or go through the API run in their own projects, after the rest, on data they create and delete.
+- The API maps errors in one table and holds no rules of its own, so a rule is written once, in the database, and tested both directly and through HTTP.
 - Every run gets a fresh database from Testcontainers, the same locally and in CI, so no test depends on what an earlier run left behind.
 - CI uploads the HTML report as an artifact, so a failure can be inspected without running it locally.

@@ -1,46 +1,59 @@
 import path from 'node:path';
-import { PostgreSqlContainer } from '@testcontainers/postgresql';
+import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
+import type { FastifyInstance } from 'fastify';
+import { buildApp } from './api/src/app.ts';
 
-// Starts a fresh PostgreSQL 16 for the run with Testcontainers, unless:
-//   - DB_URL is set: the tests use that database instead (an existing one, or
-//     the docker-compose one for exploring with DBeaver);
-//   - only non-database projects were asked for (npm run test:web).
+// Starts what the selected projects need, and returns the function that stops it.
 //
-// The container gets a random free port, so it never clashes with another
-// PostgreSQL on 5432, and runs every file in db/init on start, exactly like
-// docker-compose does. Workers read DB_URL from the environment set here.
-// The function it returns stops the container when the run ends.
-export default async function globalSetup(): Promise<(() => Promise<void>) | void> {
-  if (process.env.DB_URL) return;
-  if (!databaseProjectsSelected()) return;
+// Database (projects db, db-serial, shop-api): a fresh PostgreSQL 16 from
+// Testcontainers, on a random free port, with every file in db/init loaded,
+// exactly like docker-compose. Skipped when DB_URL is set: the tests then use
+// that database instead.
+//
+// Shop API (project shop-api): the Fastify app from api/src, connected to that
+// database, on a random free port. Skipped when SHOP_API_URL is set.
+//
+// Workers read DB_URL and SHOP_API_URL from the environment set here.
+export default async function globalSetup(): Promise<() => Promise<void>> {
+  const projects = selectedProjects();
+  const wants = (prefix: string) => projects.length === 0 || projects.some((name) => name.startsWith(prefix));
 
-  const container = await new PostgreSqlContainer('postgres:16')
-    .withDatabase('shop')
-    .withUsername('qa')
-    .withPassword('qa')
-    // mode: the files arrive owned by root, and the init scripts run as the
-    // postgres user, which must be able to read them whatever the local mode.
-    .withCopyDirectoriesToContainer([
-      { source: path.join(__dirname, 'db', 'init'), target: '/docker-entrypoint-initdb.d', mode: 0o755 },
-    ])
-    .start();
+  let container: StartedPostgreSqlContainer | undefined;
+  let api: FastifyInstance | undefined;
 
-  process.env.DB_URL = container.getConnectionUri();
-  console.log(`PostgreSQL started by Testcontainers on port ${container.getPort()}`);
+  if ((wants('db') || wants('shop')) && !process.env.DB_URL) {
+    container = await new PostgreSqlContainer('postgres:16')
+      .withDatabase('shop')
+      .withUsername('qa')
+      .withPassword('qa')
+      // mode: the files arrive owned by root, and the init scripts run as the
+      // postgres user, which must be able to read them whatever the local mode.
+      .withCopyDirectoriesToContainer([
+        { source: path.join(__dirname, 'db', 'init'), target: '/docker-entrypoint-initdb.d', mode: 0o755 },
+      ])
+      .start();
+    process.env.DB_URL = container.getConnectionUri();
+    console.log(`PostgreSQL started by Testcontainers on port ${container.getPort()}`);
+  }
+
+  if (wants('shop') && !process.env.SHOP_API_URL) {
+    api = buildApp(process.env.DB_URL!);
+    process.env.SHOP_API_URL = await api.listen({ port: 0, host: '127.0.0.1' });
+    console.log(`Shop API started on ${process.env.SHOP_API_URL}`);
+  }
 
   return async () => {
-    await container.stop();
+    await api?.close(); // closes its connection pool first, then the database goes
+    await container?.stop();
   };
 }
 
-// True when the run includes a db project: no --project flag at all, or one
-// that starts with "db".
-function databaseProjectsSelected(): boolean {
+// The names given with --project, if any.
+function selectedProjects(): string[] {
   const args = process.argv;
-  const projects = args.flatMap((arg, i) => {
+  return args.flatMap((arg, i) => {
     if (arg.startsWith('--project=')) return [arg.slice('--project='.length)];
     if (arg === '--project' && args[i + 1]) return [args[i + 1]];
     return [];
   });
-  return projects.length === 0 || projects.some((name) => name.startsWith('db'));
 }
