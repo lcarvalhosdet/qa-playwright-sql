@@ -86,7 +86,7 @@ Errors share one shape: `{"error": "...", "code": "SH001", "detail": "...", "hin
 
 Writes run in a transaction that `api/src/retry.ts` repeats from `BEGIN` when it loses a race: `40001` (serialization failure) or `40P01` (deadlock), up to 8 attempts with exponential backoff and full jitter. Any other error is final. `POST /orders` runs as `SERIALIZABLE`, because the pending-order limit counts rows and only `SERIALIZABLE` stops two concurrent orders from both passing that count; payment and cancellation lock the rows they change, so `READ COMMITTED` is enough there. Every response from these routes has an `x-transaction-attempts` header, and a race that is still lost after the last attempt becomes `503` with `retry-after`.
 
-The tests cover it at three levels: unit tests of the helper (which codes are retried, when it gives up, the backoff curve), database tests that show the limit broken under `READ COMMITTED` and kept under `SERIALIZABLE`, and an end-to-end test that sends 12 orders at once against a limit of 3: exactly 3 are created, 9 get `409 SH006`, none get `503`, and the attempts header proves the requests collided and were retried. With retries turned off, that test fails.
+The tests cover it at three levels: unit tests of the helper (which codes are retried, when it gives up, the backoff curve), database tests that show the limit broken under `READ COMMITTED` and kept under `SERIALIZABLE`, and an end-to-end test that sends 12 orders at once against a limit of 3: exactly 3 are created, 9 get `409 SH006`, none get `503`, and the attempts header proves the requests collided and were retried. The test makes the collision certain rather than likely: it holds a lock on `audit_log` as a barrier, so the requests count and insert, then wait, and are released together once more of them than the limit are waiting. With retries turned off, that test fails.
 
 The tests start the API themselves. To try it by hand:
 
@@ -107,7 +107,7 @@ npx playwright install chromium
 npm test                 # all tests
 npm run test:web         # UI and API only, no database
 npm run test:db          # database only
-npm run test:api         # shop API end to end (runs the db tests first)
+npm run test:api         # shop API end to end (runs the database tests first)
 npm run test:unit        # unit tests, no database
 npm run report           # open the HTML report
 ```

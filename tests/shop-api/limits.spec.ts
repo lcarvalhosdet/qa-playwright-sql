@@ -1,3 +1,5 @@
+import { Client } from 'pg';
+import { DB_URL } from '../db/db.fixture';
 import { test, expect } from './api.fixture';
 
 // The pending-order limit (db/init/09_order_limits.sql) through the API.
@@ -37,11 +39,39 @@ test('twelve orders at once against a limit of 3: the limit holds and no request
   const products: number[] = [];
   for (let i = 0; i < requests; i++) products.push(await scratch.product(5));
 
-  const responses = await Promise.all(
-    products.map((productId) =>
-      api.post('/orders', { data: { customerId: customer, items: [{ productId, quantity: 1 }] } }),
-    ),
-  );
+  // A barrier, so the requests overlap every time and not only when the
+  // timing happens to line up (on a slow CI runner they once did not). The
+  // test holds an exclusive lock on audit_log. Each request counts the
+  // pending orders, inserts its own, and then waits at the audit trigger's
+  // INSERT. Once more requests than the limit are waiting, all having counted
+  // before any committed, the test lets them go.
+  const barrier = new Client({ connectionString: DB_URL });
+  await barrier.connect();
+  let responses;
+  try {
+    await barrier.query('BEGIN');
+    await barrier.query('LOCK TABLE audit_log IN EXCLUSIVE MODE');
+    const barrierPid: number = (await barrier.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+
+    const inFlight = Promise.all(
+      products.map((productId) =>
+        api.post('/orders', { data: { customerId: customer, items: [{ productId, quantity: 1 }] } }),
+      ),
+    );
+    await expect
+      .poll(
+        async () =>
+          (await db.query('SELECT COUNT(*)::int AS n FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))', [
+            barrierPid,
+          ])).rows[0].n,
+        { message: 'requests waiting at the barrier', timeout: 10_000, intervals: [20] },
+      )
+      .toBeGreaterThan(limit);
+    await barrier.query('COMMIT');
+    responses = await inFlight;
+  } finally {
+    await barrier.end();
+  }
 
   const statuses = responses.map((r) => r.status());
   expect(statuses.filter((s) => s === 201)).toHaveLength(limit);
@@ -57,9 +87,8 @@ test('twelve orders at once against a limit of 3: the limit holds and no request
   );
   expect(rows[0].n).toBe(limit);
 
-  // Proof that the requests really collided and were retried, so this test
-  // checks the retry and not a lucky ordering. Every response, 201 or 409,
-  // says how many tries its transaction took.
+  // Proof that the requests collided and were retried. Every response, 201
+  // or 409, says how many tries its transaction took.
   const attempts = responses.map((r) => Number(r.headers()['x-transaction-attempts']));
   test.info().annotations.push({ type: 'attempts per request', description: attempts.join(', ') });
   expect(attempts.every((n) => n >= 1)).toBe(true);

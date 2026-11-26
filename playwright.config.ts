@@ -51,10 +51,12 @@ export default defineConfig({
     {
       // End-to-end: the shop API (api/src) over HTTP, then the database.
       // global-setup.ts starts the API. The API commits, so this runs after
-      // the "db" tests, on data each test creates.
+      // the other database tests, on data each test creates. After db-serial
+      // too: the race test briefly locks audit_log as a barrier, which would
+      // make the lock-timing tests there wait.
       name: 'shop-api',
       testDir: './tests/shop-api',
-      dependencies: ['db'],
+      dependencies: ['db-serial'],
     },
   ],
 });
