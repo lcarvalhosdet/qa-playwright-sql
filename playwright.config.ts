@@ -29,16 +29,17 @@ export default defineConfig({
     {
       name: 'db',
       testDir: './tests/db',
-      testIgnore: /\.commit\.spec\.ts$/,
+      testIgnore: /\.serial\.spec\.ts$/,
     },
     {
-      // Tests that COMMIT for real. They start only after every "db" test has
-      // finished, so the rolled-back tests never see their data.
-      name: 'db-commit',
+      // Tests that COMMIT for real or hold locks across connections. They
+      // start only after every "db" test has finished and run one at a time,
+      // so no other test sees their data or waits on their locks.
+      name: 'db-serial',
       testDir: './tests/db',
-      testMatch: /\.commit\.spec\.ts$/,
+      testMatch: /\.serial\.spec\.ts$/,
       dependencies: ['db'],
-      workers: 1, // committed data is visible to every connection, so one at a time
+      workers: 1,
     },
   ],
 });

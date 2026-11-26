@@ -353,3 +353,85 @@ WHEN NOT MATCHED THEN
   INSERT (sku, name, price, stock) VALUES (f.sku, f.name, f.price, f.received);
 SELECT sku, price, stock FROM products ORDER BY id;
 ROLLBACK;
+
+-- ---------------------------------------------------------------------------
+-- Concurrency (db/init/08_concurrency.sql, tests/db/concurrency.serial.spec.ts)
+-- ---------------------------------------------------------------------------
+-- These need two sessions. In DBeaver, open two SQL editors on the same
+-- connection with "Open separate connection for each editor" on, and run the
+-- steps in the order of the numbers. A scenario that has to COMMIT says how to
+-- put the seed back afterwards.
+
+-- Who is waiting for whom: run this in a third editor while a session waits
+SELECT pid, state, wait_event_type, wait_event, pg_blocking_pids(pid) AS blocked_by, left(query, 60) AS query
+FROM pg_stat_activity
+WHERE datname = current_database() AND pid <> pg_backend_pid();
+
+-- The row locks held right now
+SELECT l.pid, l.locktype, l.relation::regclass, l.mode, l.granted
+FROM pg_locks l
+WHERE l.relation = 'products'::regclass;
+
+-- Scenario 1: lost update (READ COMMITTED)
+--   A1  BEGIN;
+--   A2  SELECT stock FROM products WHERE id = 1;          -- 10
+--   B1  BEGIN;
+--   B2  SELECT stock FROM products WHERE id = 1;          -- 10
+--   A3  UPDATE products SET stock = 9 WHERE id = 1;       -- 10 - 1, computed by the app
+--   A4  COMMIT;
+--   B3  UPDATE products SET stock = 9 WHERE id = 1;       -- also 10 - 1: A's sale is lost
+--   B4  ROLLBACK;                                         -- (COMMIT would keep 9)
+--   then: UPDATE products SET stock = 10 WHERE id = 1;    -- put the seed back
+-- Fix: UPDATE products SET stock = stock - 1, or SELECT ... FOR UPDATE in A2 and B2
+-- (then B2 waits until A4).
+
+-- Scenario 2: REPEATABLE READ stops the lost update
+--   B1  BEGIN ISOLATION LEVEL REPEATABLE READ;
+--   B2  SELECT stock FROM products WHERE id = 1;          -- snapshot taken here
+--   A1  UPDATE products SET stock = stock - 1 WHERE id = 1;  -- autocommit
+--   B3  UPDATE products SET stock = 9 WHERE id = 1;       -- 40001: could not serialize access
+--   B4  ROLLBACK;
+--   A2  UPDATE products SET stock = stock + 1 WHERE id = 1;  -- put the seed back
+
+-- Scenario 3: deadlock
+--   A1  BEGIN;  UPDATE products SET stock = stock WHERE id = 1;
+--   B1  BEGIN;  UPDATE products SET stock = stock WHERE id = 2;
+--   A2  UPDATE products SET stock = stock WHERE id = 2;   -- waits for B
+--   B2  UPDATE products SET stock = stock WHERE id = 1;   -- after ~1s one of them gets 40P01
+--   A3  ROLLBACK;  B3 ROLLBACK;
+
+-- Scenario 4: the last unit
+--   A1  BEGIN;  CALL place_order(1, '[{"product_id": 3, "quantity": 3}]');  -- takes the 3 monitors
+--   B1  BEGIN;  CALL place_order(2, '[{"product_id": 3, "quantity": 1}]');  -- waits for A
+--   A2  COMMIT;   -- B fails now: SH001, requested 1, in stock 0
+--   (to put the seed back: CALL cancel_order(<the order A created>);)
+-- With A2 ROLLBACK instead, B succeeds.
+
+-- Scenario 5: write skew, "one PENDING order per customer" checked by the app
+--   A1  BEGIN ISOLATION LEVEL SERIALIZABLE;
+--   B1  BEGIN ISOLATION LEVEL SERIALIZABLE;
+--   A2  SELECT count(*) FROM orders WHERE customer_id = 3 AND status = 'PENDING';  -- 0
+--   B2  SELECT count(*) FROM orders WHERE customer_id = 3 AND status = 'PENDING';  -- 0
+--   A3  CALL place_order(3, '[{"product_id": 1, "quantity": 1}]');
+--   B3  CALL place_order(3, '[{"product_id": 2, "quantity": 1}]');
+--   A4  COMMIT;
+--   B4  COMMIT;   -- 40001 (or at B3). With REPEATABLE READ both commit: two PENDING orders.
+--   (to put the seed back: delete or cancel the orders that committed)
+
+-- Not waiting: run in B while A holds BEGIN; SELECT * FROM products WHERE id = 1 FOR UPDATE;
+--   SELECT * FROM products WHERE id = 1 FOR UPDATE NOWAIT;   -- 55P03 at once
+--   SET lock_timeout = '500ms'; UPDATE products SET stock = stock WHERE id = 1;  -- 55P03 after 0.5s
+--   SELECT * FROM products FOR UPDATE SKIP LOCKED;           -- every product except id 1
+
+-- Optimistic locking: single session is enough
+BEGIN;
+SELECT id, price, version FROM products WHERE id = 1;          -- version 1 on a fresh database
+SELECT update_product_price(1, 155, 1);                         -- returns 2
+SELECT update_product_price(1, 160, 1);                         -- SH005: expected 1, current 2
+ROLLBACK;
+
+-- Advisory lock: true here; false in a second session while this one is open
+BEGIN;
+SELECT refresh_daily_sales();
+SELECT locktype, objid, mode FROM pg_locks WHERE locktype = 'advisory';
+ROLLBACK;

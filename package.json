@@ -6,7 +6,7 @@
   "scripts": {
     "test": "playwright test",
     "test:web": "playwright test --project=ui --project=api",
-    "test:db": "playwright test --project=db --project=db-commit",
+    "test:db": "playwright test --project=db --project=db-serial",
     "report": "playwright show-report"
   },
   "devDependencies": {

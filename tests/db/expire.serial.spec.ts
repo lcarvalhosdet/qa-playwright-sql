@@ -4,7 +4,7 @@ import { test, expect, DB_URL } from './db.fixture';
 
 // expire_pending_orders commits after each batch, so it cannot run inside the
 // rolled-back transaction the other tests use. This file:
-//   - runs in the "db-commit" project, which starts after every "db" test has
+//   - runs in the "db-serial" project, which starts after every "db" test has
 //     finished and uses one worker (see playwright.config.ts), so no other test
 //     sees its data;
 //   - creates its own customer, product and orders, dated 1999 so that no seed

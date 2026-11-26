@@ -138,12 +138,13 @@ BEGIN
   IF TG_OP IN ('INSERT', 'UPDATE') THEN v_new := to_jsonb(NEW); END IF;
 
   IF TG_OP = 'UPDATE' THEN
-    -- Compare the two rows as JSON, key by key. updated_at always changes,
-    -- so it is left out of the list.
+    -- Compare the two rows as JSON, key by key. The bookkeeping columns
+    -- change on every update, so they are left out of the list: updated_at
+    -- (this file) and version (08_concurrency.sql).
     SELECT array_agg(n.key ORDER BY n.key) INTO v_changed
     FROM jsonb_each(v_new) AS n
     WHERE n.value IS DISTINCT FROM v_old -> n.key
-      AND n.key <> 'updated_at';
+      AND n.key NOT IN ('updated_at', 'version');
 
     IF v_changed IS NULL THEN
       RETURN NULL;  -- nothing changed, nothing to log

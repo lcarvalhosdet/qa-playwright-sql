@@ -190,7 +190,7 @@ test.describe('cancel_order', () => {
 });
 
 test.describe('expire_pending_orders', () => {
-  // The batch behavior, with real COMMITs, is in expire.commit.spec.ts.
+  // The batch behavior, with real COMMITs, is in expire.serial.spec.ts.
   test('cannot COMMIT when the CALL is inside a transaction', async ({ db }) => {
     await rolledBack(db, async () => {
       await db.query(`INSERT INTO orders (customer_id, created_at) VALUES (3, '1999-01-01')`);
