@@ -16,4 +16,15 @@ export const test = base.extend<{}, { db: Client }>({
   ],
 });
 
+// Runs `fn` inside a transaction that is always rolled back, so a test can
+// write to the database without changing the seed for the other tests.
+export async function rolledBack<T>(db: Client, fn: () => Promise<T>): Promise<T> {
+  await db.query('BEGIN');
+  try {
+    return await fn();
+  } finally {
+    await db.query('ROLLBACK');
+  }
+}
+
 export { expect } from '@playwright/test';

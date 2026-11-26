@@ -1,11 +1,12 @@
 import { test, expect } from './db.fixture';
 
-test.describe('orders database', () => {
-  test('every order belongs to an existing customer', async ({ db }) => {
+// Queries and data-quality checks against the seed in db/init/03_seed.sql.
+test.describe('orders queries', () => {
+  test('every order has at least one item', async ({ db }) => {
     const { rows } = await db.query(`
       SELECT o.id
       FROM orders o
-      WHERE NOT EXISTS (SELECT 1 FROM customers c WHERE c.id = o.customer_id)`);
+      WHERE NOT EXISTS (SELECT 1 FROM order_items oi WHERE oi.order_id = o.id)`);
     expect(rows).toEqual([]);
   });
 
@@ -18,28 +19,30 @@ test.describe('orders database', () => {
     expect(rows.map((row) => row.name)).toEqual(['Carla']);
   });
 
-  test('GROUP BY and HAVING return the revenue of repeat customers', async ({ db }) => {
+  test('GROUP BY with FILTER sums the revenue without the cancelled orders', async ({ db }) => {
     const { rows } = await db.query(`
-      SELECT c.name, COUNT(o.id)::int AS orders, SUM(o.amount) AS total
+      SELECT c.name,
+             COUNT(DISTINCT o.id)::int                                   AS orders,
+             SUM(oi.subtotal) FILTER (WHERE o.status <> 'CANCELLED')     AS revenue
       FROM customers c
-      JOIN orders o ON o.customer_id = c.id
+      JOIN orders o       ON o.customer_id = c.id
+      JOIN order_items oi ON oi.order_id   = o.id
       GROUP BY c.id, c.name
-      HAVING COUNT(o.id) >= 2
-      ORDER BY total DESC`);
+      HAVING COUNT(DISTINCT o.id) >= 2
+      ORDER BY revenue DESC`);
     expect(rows).toEqual([
-      { name: 'Ana', orders: 2, total: '150.00' },
-      { name: 'Bruno', orders: 2, total: '50.00' },
+      { name: 'Bruno', orders: 2, revenue: '900.00' },
+      { name: 'Ana', orders: 2, revenue: '300.00' },
     ]);
   });
 
-  test('the foreign key rejects an order for a customer that does not exist', async ({ db }) => {
-    await db.query('BEGIN');
-    try {
-      await expect(
-        db.query(`INSERT INTO orders (id, customer_id, amount, status) VALUES (99, 999, 10, 'PAID')`),
-      ).rejects.toThrow(/foreign key/);
-    } finally {
-      await db.query('ROLLBACK');
-    }
+  test('every payment matches the total of its order', async ({ db }) => {
+    const { rows } = await db.query(`
+      SELECT p.order_id, p.amount, SUM(oi.subtotal) AS total
+      FROM payments p
+      JOIN order_items oi ON oi.order_id = p.order_id
+      GROUP BY p.order_id, p.amount
+      HAVING p.amount <> SUM(oi.subtotal)`);
+    expect(rows).toEqual([]);
   });
 });

@@ -42,8 +42,13 @@ jobs:
       - name: Install Chromium
         run: npx playwright install --with-deps chromium
 
-      - name: Load schema and seed
-        run: psql "$DB_URL" -v ON_ERROR_STOP=1 -f db/init/01_schema.sql
+      # Same order as docker-entrypoint-initdb.d: 01_schema, 02_indexes, 03_seed
+      - name: Load schema, indexes and seed
+        run: |
+          for file in db/init/*.sql; do
+            echo "Running $file"
+            psql "$DB_URL" -v ON_ERROR_STOP=1 -q -f "$file"
+          done
 
       - name: Run tests
         run: npm test
