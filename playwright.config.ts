@@ -29,6 +29,14 @@ export default defineConfig({
       use: { baseURL: process.env.API_URL ?? 'https://jsonplaceholder.typicode.com' },
     },
     {
+      // Plans and buffer budgets on a database with volume (shop_perf), which
+      // global-setup.ts creates and fills. One worker: a test drops an index
+      // inside a transaction, which would make other tests wait.
+      name: 'perf',
+      testDir: './tests/perf',
+      workers: 1,
+    },
+    {
       // Pure functions, such as the retry helper: no browser, database or API.
       name: 'unit',
       testDir: './tests/unit',

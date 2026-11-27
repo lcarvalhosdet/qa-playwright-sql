@@ -84,11 +84,12 @@ INSERT INTO orders (customer_id, status)
 SELECT 3 AS customer_id, 'PAID' AS status FROM generate_series(1, 20000);
 ANALYZE orders;
 
--- Index Scan (or Bitmap Index Scan) on orders_customer_id_idx
+-- Index Scan on orders_customer_created_idx (11_performance.sql replaced the
+-- single-column index from 02 with this one, which starts with customer_id)
 EXPLAIN ANALYZE SELECT * FROM orders WHERE customer_id = 2;
 
 -- Without the index, for comparison: DROP INDEX is transactional too
-DROP INDEX orders_customer_id_idx;
+DROP INDEX orders_customer_created_idx;
 EXPLAIN ANALYZE SELECT * FROM orders WHERE customer_id = 2;  -- Seq Scan over 20,004 rows
 
 -- Partial index: used for PENDING, not for PAID
@@ -441,3 +442,52 @@ BEGIN;
 SELECT refresh_daily_sales();
 SELECT locktype, objid, mode FROM pg_locks WHERE locktype = 'advisory';
 ROLLBACK;
+
+-- ---------------------------------------------------------------------------
+-- Performance (db/init/11_performance.sql; volume in db/perf/volume.sql)
+-- ---------------------------------------------------------------------------
+-- The plans below only show their point with volume. To get it on the
+-- docker-compose database:
+--   CREATE DATABASE shop_perf TEMPLATE shop;   -- from the postgres database
+--   psql -d shop_perf -f db/perf/volume.sql
+--   VACUUM ANALYZE;
+-- and connect to shop_perf.
+
+-- BUFFERS: the pages each node read. Work, not time, so it compares across machines.
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT id, status, created_at
+FROM orders
+WHERE customer_id = (SELECT c.id FROM customers c WHERE lower(c.email) = 'wholesale@perf.example.com')
+ORDER BY created_at DESC
+LIMIT 10;                                        -- Index Only Scan, no Sort, Heap Fetches: 0
+
+-- Partition pruning: only the partitions the WHERE can match are read
+EXPLAIN SELECT COUNT(*) FROM audit_log
+WHERE changed_at >= date_trunc('month', now()) AND changed_at < date_trunc('month', now()) + INTERVAL '1 month';
+
+-- The partitions and their sizes
+SELECT inhrelid::REGCLASS AS partition, pg_size_pretty(pg_relation_size(inhrelid)) AS size
+FROM pg_inherits
+WHERE inhparent = 'audit_log'::REGCLASS
+ORDER BY partition;
+
+-- BRIN against the B-tree primary key of the same partition
+SELECT indexrelid::REGCLASS AS index_name, pg_size_pretty(pg_relation_size(indexrelid)) AS size
+FROM pg_index
+WHERE indrelid = ('audit_log_' || to_char(now(), 'YYYY_MM'))::REGCLASS;
+
+-- pg_stat_statements: the statements that cost the most in total
+SELECT calls, round(total_exec_time::NUMERIC, 1) AS total_ms, round(mean_exec_time::NUMERIC, 3) AS mean_ms,
+       shared_blks_hit + shared_blks_read AS buffers, left(query, 80) AS query
+FROM pg_stat_statements
+WHERE dbid = (SELECT d.oid FROM pg_database d WHERE d.datname = current_database())
+ORDER BY total_exec_time DESC
+LIMIT 10;
+
+SELECT pg_stat_statements_reset();               -- start counting again
+
+-- Indexes that no query has used since the statistics were reset
+SELECT relname AS table_name, indexrelname AS index_name, idx_scan, pg_size_pretty(pg_relation_size(indexrelid)) AS size
+FROM pg_stat_user_indexes
+WHERE idx_scan = 0
+ORDER BY pg_relation_size(indexrelid) DESC;

@@ -1,20 +1,26 @@
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import type { FastifyInstance } from 'fastify';
+import { Client } from 'pg';
 import { buildApp } from './api/src/app.ts';
 
 // Starts what the selected projects need, and returns the function that stops it.
 //
-// Database (projects db, db-serial, shop-api): a fresh PostgreSQL 16 from
+// Database (projects db, db-serial, shop-api, perf): a fresh PostgreSQL 16 from
 // Testcontainers, on a random free port, with every file in db/init loaded,
-// exactly like docker-compose. Skipped when DB_URL is set: the tests then use
-// that database instead.
+// exactly like docker-compose, and pg_stat_statements loaded at start.
+// Skipped when DB_URL is set: the tests then use that database instead.
+//
+// Performance database (project perf): shop_perf, a copy of that database
+// made with CREATE DATABASE ... TEMPLATE, then filled by db/perf/volume.sql.
+// Skipped when PERF_DB_URL is set.
 //
 // Shop API (project shop-api): the Fastify app from api/src, on a random free
 // port, connected to that database as shop_api, the least-privilege role from
 // 10_security.sql, not as the superuser. Skipped when SHOP_API_URL is set.
 //
-// Workers read DB_URL and SHOP_API_URL from the environment set here.
+// Workers read DB_URL, PERF_DB_URL and SHOP_API_URL from the environment set here.
 export default async function globalSetup(): Promise<() => Promise<void>> {
   const projects = selectedProjects();
   const wants = (prefix: string) => projects.length === 0 || projects.some((name) => name.startsWith(prefix));
@@ -22,11 +28,12 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
   let container: StartedPostgreSqlContainer | undefined;
   let api: FastifyInstance | undefined;
 
-  if ((wants('db') || wants('shop')) && !process.env.DB_URL) {
+  if ((wants('db') || wants('shop') || wants('perf')) && !process.env.DB_URL) {
     container = await new PostgreSqlContainer('postgres:16')
       .withDatabase('shop')
       .withUsername('qa')
       .withPassword('qa')
+      .withCommand(['postgres', '-c', 'shared_preload_libraries=pg_stat_statements'])
       // mode: the files arrive owned by root, and the init scripts run as the
       // postgres user, which must be able to read them whatever the local mode.
       .withCopyDirectoriesToContainer([
@@ -37,8 +44,14 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
     console.log(`PostgreSQL started by Testcontainers on port ${container.getPort()}`);
   }
 
+  // Before anything else connects to shop: a database can only be copied as a
+  // template while nobody is connected to it.
+  if (wants('perf') && !process.env.PERF_DB_URL) {
+    process.env.PERF_DB_URL = await createPerfDatabase(process.env.DB_URL!);
+  }
+
   if (wants('shop') && !process.env.SHOP_API_URL) {
-    api = buildApp(asRole(process.env.DB_URL!, 'shop_api', 'shop_api'));
+    api = buildApp(withUser(process.env.DB_URL!, 'shop_api', 'shop_api'));
     process.env.SHOP_API_URL = await api.listen({ port: 0, host: '127.0.0.1' });
     console.log(`Shop API started on ${process.env.SHOP_API_URL}`);
   }
@@ -49,11 +62,46 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
   };
 }
 
+// Copies shop into shop_perf and loads the volume. Returns its URL.
+async function createPerfDatabase(shopUrl: string): Promise<string> {
+  const started = Date.now();
+  const admin = new Client({ connectionString: withDatabase(shopUrl, 'postgres') });
+  await admin.connect();
+  try {
+    await admin.query('DROP DATABASE IF EXISTS shop_perf');
+    await admin.query('CREATE DATABASE shop_perf TEMPLATE shop');
+  } finally {
+    await admin.end();
+  }
+
+  const perfUrl = withDatabase(shopUrl, 'shop_perf');
+  const perf = new Client({ connectionString: perfUrl });
+  await perf.connect();
+  try {
+    await perf.query(await readFile(path.join(__dirname, 'db', 'perf', 'volume.sql'), 'utf8'));
+    // Fresh statistics for the planner, and a visibility map so an index can
+    // answer a query without visiting the table (Index Only Scan). VACUUM
+    // cannot run inside a transaction, so it is its own statement.
+    await perf.query('VACUUM ANALYZE');
+  } finally {
+    await perf.end();
+  }
+  console.log(`Performance database shop_perf loaded in ${((Date.now() - started) / 1000).toFixed(1)}s`);
+  return perfUrl;
+}
+
 // The same database URL with another user and password.
-function asRole(databaseUrl: string, user: string, password: string): string {
+function withUser(databaseUrl: string, user: string, password: string): string {
   const url = new URL(databaseUrl);
   url.username = user;
   url.password = password;
+  return url.toString();
+}
+
+// The same database URL pointing at another database.
+function withDatabase(databaseUrl: string, database: string): string {
+  const url = new URL(databaseUrl);
+  url.pathname = `/${database}`;
   return url.toString();
 }
 

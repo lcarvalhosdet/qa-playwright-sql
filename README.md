@@ -9,7 +9,8 @@ UI, API and database tests in one Playwright project, written in TypeScript and 
 | Layer | Target | Tests |
 | --- | --- | --- |
 | Shop API, end to end | the project's own API (`api/`) over the shop database | create, pay and cancel orders, then check stock, payments and the audit log in the database; error codes mapped to HTTP statuses; request validation; optimistic locking; two orders racing for the last unit |
-| Database | PostgreSQL 16 | constraints and indexes, functions, stored procedures, triggers, reporting views, upsert, concurrency (lost updates, isolation levels, deadlocks, optimistic and advisory locks) |
+| Database | PostgreSQL 16 | constraints and indexes, functions, stored procedures, triggers, reporting views, upsert, concurrency (lost updates, isolation levels, deadlocks, optimistic and advisory locks), roles and row-level security |
+| Performance | the same schema with 200,000 orders | the plan of each hot query and a budget of pages it may read, partition pruning, BRIN, redundant and missing indexes |
 | UI | [Sauce Demo](https://www.saucedemo.com), a public demo store | login and add to cart, locked-out user error, sort by price |
 | API | [JSONPlaceholder](https://jsonplaceholder.typicode.com), a public fake API | GET a post, POST a post, 404 for a missing post |
 
@@ -31,6 +32,7 @@ Tables: `customers`, `products`, `categories`, `orders`, `order_items` and `paym
 | `08_concurrency.sql` | a `version` column and `update_product_price` for optimistic locking, `refresh_daily_sales` guarded by an advisory lock |
 | `09_order_limits.sql` | a limit of pending orders per customer, checked by a trigger that counts rows; exact only under `SERIALIZABLE`, which is why the API retries |
 | `10_security.sql` | three least-privilege roles (the API, reporting, customers), routines closed to `PUBLIC`, `SECURITY DEFINER` procedures with a pinned `search_path` as the only write path, an audit log nobody can forge, row-level security so a customer sees only their own orders, and a `security_invoker` view so RLS is not bypassed through it |
+| `11_performance.sql` | a composite covering index for a customer's latest orders (replacing a now-redundant one), indexes for the foreign keys added later, `audit_log` converted to monthly partitions with a BRIN index on its timestamp, and `pg_stat_statements` |
 
 Every file starts with a comment that explains its concepts, and [`sql/queries.sql`](sql/queries.sql) has runnable examples of all of them for DBeaver or psql, including two-session scripts for the concurrency scenarios.
 
@@ -64,6 +66,22 @@ How it fits together:
 - **Row-level security.** The portal sets `app.customer_id` per transaction, and policies on `customers`, `orders`, `order_items` and `payments` return only that customer's rows; with the setting missing or empty, nothing. A plain view reads as its owner and would leak every row past RLS, which a test demonstrates; `order_totals` is `security_invoker`, so RLS applies through it.
 
 The tests switch roles with `SET LOCAL ROLE` inside rolled-back transactions, and the end-to-end tests check that the API really connects as `shop_api`: not a superuser, not exempt from RLS, refused a direct `UPDATE`, and named in the audit log for the changes it makes.
+
+## Performance
+
+The seed is too small for plans to mean anything: with a handful of rows, reading a whole table is the right choice. For the `perf` project, `global-setup.ts` copies the database with `CREATE DATABASE shop_perf TEMPLATE shop` and fills it with `db/perf/volume.sql`: 20,000 customers, one wholesale customer with 5,000 orders, 205,000 orders over the last 12 months, 512,000 order items, 154,000 payments and 205,000 audit rows across 13 monthly partitions. It loads in about 4 seconds, with triggers and foreign key checks off (the data is consistent by construction) and `ANALYZE` after each bulk insert.
+
+The tests in `tests/perf` run `EXPLAIN (ANALYZE, BUFFERS)` on the queries the shop runs most and check:
+
+- **the plan**: which index, and no `Sort` or `Seq Scan` where there should be none. A customer's latest orders come from an Index Only Scan with no heap fetches.
+- **a budget of buffers**: the 8 kB pages a query reads, about twice today's count. Pages measure work independently of the machine, so the budget fails when a query starts doing far more work, never because CI was slow. One test drops the index inside a transaction to show the budget catching it.
+- **partitions**: a query for one month reads one partition; a lookup without the partition key has to visit them all.
+- **BRIN**: under a tenth of the size of a B-tree on the same column, and used for date ranges.
+- **pg_stat_statements**: the same query with different values is one entry, with `$1` in place of the value.
+
+Two catalog checks run on the normal database too: every foreign key has an index that starts with its columns, and no index is redundant (the leading columns of another one). Both caught something: `categories` and `stock_alerts` had foreign keys added after phase 1 without an index.
+
+One lesson came from the load itself: the `INSERT` of the order items took 19 seconds, because right after the bulk inserts the planner still had the statistics of the 4-row seed and chose a nested loop that rebuilt the product list for each of 205,000 orders. An `ANALYZE` before it brought it to under 2 seconds.
 
 ## Shop API
 
@@ -109,10 +127,11 @@ npm run test:web         # UI and API only, no database
 npm run test:db          # database only
 npm run test:api         # shop API end to end (runs the database tests first)
 npm run test:unit        # unit tests, no database
+npm run test:perf        # plans and budgets on 200,000 orders (loads them first)
 npm run report           # open the HTML report
 ```
 
-`global-setup.ts` starts a fresh PostgreSQL 16 with [Testcontainers](https://testcontainers.com) for every run, loads everything in `db/init`, starts the shop API on top of it, and removes both at the end. Both listen on random free ports, so they never clash with anything on 5432 or 3000. To run against a database you already have instead, set `DB_URL` (and `SHOP_API_URL` for an API already running):
+`global-setup.ts` starts a fresh PostgreSQL 16 with [Testcontainers](https://testcontainers.com) for every run, loads everything in `db/init`, creates and fills `shop_perf` when the `perf` project runs, starts the shop API on top of it, and removes everything at the end. Both listen on random free ports, so they never clash with anything on 5432 or 3000. To run against a database you already have instead, set `DB_URL` (and `SHOP_API_URL` for an API already running):
 
 ```bash
 DB_URL=postgresql://qa:qa@localhost:5432/shop npm test
@@ -143,6 +162,8 @@ tests/ui/                           UI tests (Sauce Demo)
 tests/api/                          API tests (JSONPlaceholder)
 api/src/                            the shop API: app, error mapping, retries, routes
 tests/unit/                         unit tests of pure functions (the retry helper)
+tests/perf/                         plans and buffer budgets on the volume database
+db/perf/volume.sql                  205,000 orders for the perf tests, loaded into shop_perf
 tests/shop-api/                     end-to-end tests: HTTP request, then database checks
 tests/db/db.fixture.ts              worker-scoped pg connection and a rolled-back transaction helper
 tests/db/scratch.ts                 test data that commits for real, removed after each test
