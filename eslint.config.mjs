@@ -16,5 +16,11 @@ export default tseslint.config(
   {
     files: ['tests/**/*.ts'],
     ...playwright.configs['flat/recommended'],
+    rules: {
+      ...playwright.configs['flat/recommended'].rules,
+      // fast-check's fc.assert fails the test like expect does. The plugin
+      // matches the method name only, so this is "assert", not "fc.assert".
+      'playwright/expect-expect': ['warn', { assertFunctionNames: ['assert'] }],
+    },
   },
 );

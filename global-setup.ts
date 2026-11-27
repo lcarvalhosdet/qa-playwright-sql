@@ -1,16 +1,19 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
+import { GenericContainer } from 'testcontainers';
 import type { FastifyInstance } from 'fastify';
 import { Client } from 'pg';
 import { buildApp } from './api/src/app.ts';
+import { migrate } from './db/migrate.ts';
 
 // Starts what the selected projects need, and returns the function that stops it.
 //
 // Database (projects db, db-serial, shop-api, perf): a fresh PostgreSQL 16 from
-// Testcontainers, on a random free port, with every file in db/init loaded,
-// exactly like docker-compose, and pg_stat_statements loaded at start.
-// Skipped when DB_URL is set: the tests then use that database instead.
+// Testcontainers, on a random free port, with pg_stat_statements loaded at
+// start and every migration in db/init applied by db/migrate.ts. Skipped when
+// DB_URL is set: the tests then use that database, migrated to the latest
+// version first.
 //
 // Performance database (project perf): shop_perf, a copy of that database
 // made with CREATE DATABASE ... TEMPLATE, then filled by db/perf/volume.sql.
@@ -29,19 +32,24 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
   let api: FastifyInstance | undefined;
 
   if ((wants('db') || wants('shop') || wants('perf')) && !process.env.DB_URL) {
-    container = await new PostgreSqlContainer('postgres:16')
+    // postgres:16 plus pgTAP (db/docker/Dockerfile). Docker caches the build,
+    // so after the first run this takes a moment.
+    const image = 'qa-playwright-sql-postgres:16';
+    await GenericContainer.fromDockerfile(path.join(__dirname, 'db', 'docker')).build(image, { deleteOnExit: false });
+    container = await new PostgreSqlContainer(image)
       .withDatabase('shop')
       .withUsername('qa')
       .withPassword('qa')
       .withCommand(['postgres', '-c', 'shared_preload_libraries=pg_stat_statements'])
-      // mode: the files arrive owned by root, and the init scripts run as the
-      // postgres user, which must be able to read them whatever the local mode.
-      .withCopyDirectoriesToContainer([
-        { source: path.join(__dirname, 'db', 'init'), target: '/docker-entrypoint-initdb.d', mode: 0o755 },
-      ])
       .start();
     process.env.DB_URL = container.getConnectionUri();
     console.log(`PostgreSQL started by Testcontainers on port ${container.getPort()}`);
+  }
+
+  if (wants('db') || wants('shop') || wants('perf')) {
+    const { applied } = await migrate(process.env.DB_URL!, { dir: path.join(__dirname, 'db', 'init') });
+    console.log(`Migrations: ${applied.length} applied`);
+    await installPgTap(process.env.DB_URL!);
   }
 
   // Before anything else connects to shop: a database can only be copied as a
@@ -60,6 +68,22 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
     await api?.close(); // closes its connection pool first, then the database goes
     await container?.stop();
   };
+}
+
+// pgTAP goes into its own schema, tap, so test tooling stays out of public
+// and out of the migrations. Without the extension (a database from another
+// image), the pgTAP tests skip themselves.
+async function installPgTap(databaseUrl: string): Promise<void> {
+  const client = new Client({ connectionString: databaseUrl });
+  await client.connect();
+  try {
+    await client.query('CREATE SCHEMA IF NOT EXISTS tap');
+    await client.query('CREATE EXTENSION IF NOT EXISTS pgtap SCHEMA tap');
+  } catch (error) {
+    console.warn(`pgTAP not installed, its tests will be skipped: ${(error as Error).message}`);
+  } finally {
+    await client.end();
+  }
 }
 
 // Copies shop into shop_perf and loads the volume. Returns its URL.

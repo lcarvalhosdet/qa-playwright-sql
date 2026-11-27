@@ -9,7 +9,7 @@ UI, API and database tests in one Playwright project, written in TypeScript and 
 | Layer | Target | Tests |
 | --- | --- | --- |
 | Shop API, end to end | the project's own API (`api/`) over the shop database | create, pay and cancel orders, then check stock, payments and the audit log in the database; error codes mapped to HTTP statuses; request validation; optimistic locking; two orders racing for the last unit |
-| Database | PostgreSQL 16 | constraints and indexes, functions, stored procedures, triggers, reporting views, upsert, concurrency (lost updates, isolation levels, deadlocks, optimistic and advisory locks), roles and row-level security |
+| Database | PostgreSQL 16 | constraints and indexes, functions, stored procedures, triggers, reporting views, upsert, concurrency (lost updates, isolation levels, deadlocks, optimistic and advisory locks), roles and row-level security, migrations and an upgrade with data, pgTAP, model-based property tests |
 | Performance | the same schema with 200,000 orders | the plan of each hot query and a budget of pages it may read, partition pruning, BRIN, redundant and missing indexes |
 | UI | [Sauce Demo](https://www.saucedemo.com), a public demo store | login and add to cart, locked-out user error, sort by price |
 | API | [JSONPlaceholder](https://jsonplaceholder.typicode.com), a public fake API | GET a post, POST a post, 404 for a missing post |
@@ -18,7 +18,7 @@ The UI and public API tests are examples against well-known practice sites; they
 
 ## Database
 
-Tables: `customers`, `products`, `categories`, `orders`, `order_items` and `payments`, plus `audit_log`, `stock_alerts` and `order_status_transitions` used by the triggers. The files in `db/init` run in name order, the way migrations would:
+Tables: `customers`, `products`, `categories`, `orders`, `order_items` and `payments`, plus `audit_log`, `stock_alerts` and `order_status_transitions` used by the triggers. The files in `db/init` are migrations, applied in name order by `db/migrate.ts` (see [Migrations](#migrations)):
 
 | File | What it has |
 | --- | --- |
@@ -33,6 +33,7 @@ Tables: `customers`, `products`, `categories`, `orders`, `order_items` and `paym
 | `09_order_limits.sql` | a limit of pending orders per customer, checked by a trigger that counts rows; exact only under `SERIALIZABLE`, which is why the API retries |
 | `10_security.sql` | three least-privilege roles (the API, reporting, customers), routines closed to `PUBLIC`, `SECURITY DEFINER` procedures with a pinned `search_path` as the only write path, an audit log nobody can forge, row-level security so a customer sees only their own orders, and a `security_invoker` view so RLS is not bypassed through it |
 | `11_performance.sql` | a composite covering index for a customer's latest orders (replacing a now-redundant one), indexes for the foreign keys added later, `audit_log` converted to monthly partitions with a BRIN index on its timestamp, and `pg_stat_statements` |
+| `12_audit_partition_backfill.sql` | moves audit history that 11 left in the default partition into monthly partitions, on databases that already had history; a fix-forward found by the upgrade test |
 
 Every file starts with a comment that explains its concepts, and [`sql/queries.sql`](sql/queries.sql) has runnable examples of all of them for DBeaver or psql, including two-session scripts for the concurrency scenarios.
 
@@ -83,6 +84,20 @@ Two catalog checks run on the normal database too: every foreign key has an inde
 
 One lesson came from the load itself: the `INSERT` of the order items took 19 seconds, because right after the bulk inserts the planner still had the statistics of the 4-row seed and chose a nested loop that rebuilt the product list for each of 205,000 orders. An `ANALYZE` before it brought it to under 2 seconds.
 
+## Migrations
+
+`db/migrate.ts` applies the files in `db/init` in name order, each in its own transaction, and records them in `schema_migrations` with a checksum of the file. Applied files are skipped; a file changed after it was applied stops the run, because that database and a fresh one would no longer match; a migration that fails is rolled back whole and not recorded. Two runners started at once take turns on an advisory lock. The tests use it in `global-setup.ts`, and `npm run migrate` applies it to any database.
+
+`tests/db/migrations.spec.ts` builds databases of its own to test it: running twice changes nothing, an edited migration is refused, a failing one leaves no trace, and two runners at once apply each file once. The upgrade tests build a database at version 10, give it history (orders, payments, cancellations, audit rows from past months and years), and migrate it to the latest version, checking that every audit row keeps its id and content.
+
+That test found a real bug: on a database with history, migration 11 put every older audit row into the default partition, and from then on a partition for those months could not be created (23514). 11 had already been applied, so the fix is a new migration, 12, which moves the history into monthly partitions, instead of an edit to 11. A test shows 11 alone failing and 11 plus 12 keeping every row in the right month.
+
+## Other ways to test the database
+
+**pgTAP.** `db/tests/*.sql` are tests written in SQL with [pgTAP](https://pgtap.org), installed in its own `tap` schema from a Postgres image that adds it (`db/docker/Dockerfile`). `01_schema_contract.sql` pins the shape of the schema in 48 one-line facts: tables, column types, keys, indexes, triggers, the volatility of functions, `SECURITY DEFINER`, roles, table privileges and RLS policies. `02_business_rules.sql` checks rules with `results_eq`, `throws_ok` and `lives_ok`. `tests/db/pgtap.spec.ts` runs each file in a rolled-back transaction and reports every TAP line as its own assertion. pgTAP is the better fit for the schema contract; the Playwright tests read better for flows and anything that needs several connections.
+
+**Property-based, model-based.** `tests/db/model.spec.ts` uses [fast-check](https://fast-check.dev) to generate 100 random sequences of up to 20 steps (place an order with random items, pay an order, cancel an order) and runs each step against the database and against a model of a few lines of TypeScript. After every step both must agree on the outcome, success or the exact SQLSTATE (`SH001` stock, `SH002` status, `SH006` limit, `22023` duplicate), and on the state: stock, statuses, payments. When they disagree, fast-check shrinks the sequence to the shortest one that still fails. A mutation test breaks `cancel_order` on purpose so it forgets to return the stock, and checks that the property catches it and shrinks the failure to two steps: `place(p0x1),cancel(0)`.
+
 ## Shop API
 
 A small [Fastify](https://fastify.dev) app in `api/src`, connected as `shop_api`, with no business rules of its own: each route calls a procedure, function or view from `db/init`, and one table in `api/src/errors.ts` turns the database's SQLSTATE codes into HTTP statuses.
@@ -110,6 +125,7 @@ The tests start the API themselves. To try it by hand:
 
 ```bash
 docker compose up -d     # the database on port 5432
+npm run migrate          # apply the migrations
 npm run api              # http://127.0.0.1:3000, connects as shop_api (API_DB_URL to change)
 curl -X POST localhost:3000/orders -H 'content-type: application/json' \
   -d '{"customerId": 1, "items": [{"productId": 1, "quantity": 2}]}'
@@ -131,13 +147,13 @@ npm run test:perf        # plans and budgets on 200,000 orders (loads them first
 npm run report           # open the HTML report
 ```
 
-`global-setup.ts` starts a fresh PostgreSQL 16 with [Testcontainers](https://testcontainers.com) for every run, loads everything in `db/init`, creates and fills `shop_perf` when the `perf` project runs, starts the shop API on top of it, and removes everything at the end. Both listen on random free ports, so they never clash with anything on 5432 or 3000. To run against a database you already have instead, set `DB_URL` (and `SHOP_API_URL` for an API already running):
+`global-setup.ts` starts a fresh PostgreSQL 16 with pgTAP ([Testcontainers](https://testcontainers.com), from `db/docker/Dockerfile`) for every run, applies the migrations, creates and fills `shop_perf` when the `perf` project runs, starts the shop API on top of it, and removes everything at the end. Both listen on random free ports, so they never clash with anything on 5432 or 3000. To run against a database you already have instead, set `DB_URL` (and `SHOP_API_URL` for an API already running):
 
 ```bash
 DB_URL=postgresql://qa:qa@localhost:5432/shop npm test
 ```
 
-`docker-compose.yml` is still there for exploring the database by hand in DBeaver or psql (`docker compose up -d`, port 5432). Its scripts run only when the volume is created, so after changing `db/init` recreate it with `docker compose down -v && docker compose up -d`.
+`docker-compose.yml` is still there for exploring the database by hand in DBeaver or psql: `docker compose up -d` (port 5432), then `npm run migrate`, which also applies new migrations later.
 
 ### Checks
 
@@ -175,7 +191,12 @@ tests/db/triggers.spec.ts           triggers: updated_at, status rules, audit lo
 tests/db/reporting.spec.ts          views: recursive CTEs, window functions, ROLLUP, materialized view, upsert
 tests/db/expire.serial.spec.ts      batch job that commits (db-serial project)
 tests/db/concurrency.serial.spec.ts two sessions at once: locks, isolation, deadlocks (db-serial project)
-db/init/                            schema, indexes, seed, functions, procedures, triggers, views, concurrency
+db/init/                            the migrations: schema, seed, functions, procedures, triggers, views, security, performance
+db/migrate.ts, db/migrate-cli.ts    migration runner (npm run migrate)
+db/tests/                           pgTAP tests in SQL
+db/docker/Dockerfile                postgres:16 plus pgTAP
+tests/db/model.spec.ts              fast-check model-based test of the order procedures
+tests/db/migrations.spec.ts         the runner and the upgrade from version 10
 sql/queries.sql                     examples of everything above for DBeaver or psql
 global-setup.ts                     starts PostgreSQL (Testcontainers) and the shop API for the run
 .github/workflows/tests.yml         CI: checks job and tests job

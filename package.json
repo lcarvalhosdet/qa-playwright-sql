@@ -14,10 +14,11 @@
     "test:api": "playwright test --project=shop-api",
     "test:perf": "playwright test --project=perf",
     "report": "playwright show-report",
+    "migrate": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON db/migrate-cli.ts",
     "api": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON api/src/main.ts",
     "typecheck": "tsc -p .",
     "lint": "eslint .",
-    "lint:sql": "sqlfluff lint db/init db/perf sql",
+    "lint:sql": "sqlfluff lint db/init db/perf db/tests sql",
     "check": "npm run typecheck && npm run lint && npm run lint:sql"
   },
   "devDependencies": {
@@ -28,7 +29,9 @@
     "@types/pg": "^8.23.1",
     "eslint": "^10.15.0",
     "eslint-plugin-playwright": "^2.12.2",
+    "fast-check": "^4.11.0",
     "pg": "^8.23.1",
+    "testcontainers": "^12.2.2",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.74.0"
   },

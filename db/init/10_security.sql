@@ -18,9 +18,22 @@
 --
 -- Error code for every refusal here: 42501 insufficient_privilege.
 
-CREATE ROLE shop_api LOGIN PASSWORD 'shop_api';
-CREATE ROLE shop_reporting NOLOGIN;
-CREATE ROLE shop_customer NOLOGIN;
+-- Roles belong to the whole server, not to one database, so a second database
+-- on the same server (the upgrade test builds one) finds them already there.
+-- CREATE ROLE has no IF NOT EXISTS, hence the DO block.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'shop_api') THEN
+    CREATE ROLE shop_api LOGIN PASSWORD 'shop_api';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'shop_reporting') THEN
+    CREATE ROLE shop_reporting NOLOGIN;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'shop_customer') THEN
+    CREATE ROLE shop_customer NOLOGIN;
+  END IF;
+END;
+$$;
 
 -- ---------------------------------------------------------------------------
 -- 1. Routines: nobody may run them unless granted
